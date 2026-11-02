@@ -27,7 +27,7 @@ Check that it works:
 .venv/bin/python -m pytest -q
 ```
 
-You should see `34 passed`. The tests render real video with FFmpeg, so they take about 20 seconds.
+You should see `35 passed`. The tests render real video with FFmpeg, so they take about 20 seconds.
 
 ## Part 2: Make a sample webinar
 

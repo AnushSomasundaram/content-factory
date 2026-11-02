@@ -14,7 +14,7 @@ Paste any of these into the dashboard's **MeetStream link, meeting link, or bot 
 | A MeetStream link | `https://app.meetstream.ai/…/0c0f8353-ad37-…` (dashboard, API or any `*.meetstream.ai` URL) | The bot id is taken from the URL |
 | The meeting's own link | `https://zoom.us/j/8812345678?pwd=…`, `https://meet.google.com/abc-defg-hij`, a Teams join link | The app finds the bot MeetStream sent to that meeting and uses its recording |
 
-**How meeting links are matched.** The app reads your bots (`GET /bots`, following pages) and compares each bot's `meeting_link` with yours. The comparison ignores the differences between copies of the same invite:
+**How meeting links are matched.** The app reads your bots (`GET /bots`, following pages) and compares each bot's `meeting_link` with yours. MeetStream documents List Bots entries only loosely. So for any bot listed without a meeting link, the app reads it from `GET /bots/{id}/detail` (`MeetingLink`), newest bots first, for up to 50 bots. The comparison ignores the differences between copies of the same invite:
 
 | Platform | Two links count as the same meeting if… |
 |---|---|

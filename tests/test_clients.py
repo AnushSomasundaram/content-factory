@@ -170,6 +170,20 @@ def test_meeting_link_search_follows_pages_and_stops_if_cursor_is_ignored():
     assert len(calls) == 3  # third call returned page 2 again (no new bots), so it stopped
 
 
+def test_meeting_link_falls_back_to_bot_detail_when_list_omits_links():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/bots":
+            return httpx.Response(200, json={"bots": [{"BotID": "x1", "Status": "Done"}, {"BotID": "x2", "Status": "Done"}],
+                                             "hasNextPage": False})
+        bot_id = request.url.path.split("/")[-2]
+        link = LINK if bot_id == "x2" else "https://zoom.us/j/1"
+        return httpx.Response(200, json={"bot_details": {"BotID": bot_id, "MeetingLink": link, "Status": "Stopped",
+                                                         "CreatedAt": "2026-10-20T10:00:00Z"}})
+
+    r = resolve_recording(MeetStreamClient("k", transport=httpx.MockTransport(handler)), LINK)
+    assert r.bot_id == "x2"
+
+
 def test_bot_id_and_meetstream_url_need_no_api_call():
     def handler(request):
         raise AssertionError("no API call expected")

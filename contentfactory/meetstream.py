@@ -179,6 +179,9 @@ NO_RECORDING_STATUSES = {"notallowed", "denied", "failed", "error", "cancelled",
 # tried; if the media isn't ready, ingest waits on MeetStream's 202 responses as usual.
 
 MAX_LIST_PAGES = 20  # List Bots pages to scan when matching a meeting link
+# List Bots documents its entries only as "map from string to any"; Get Bot Details documents
+# `MeetingLink`. For bots listed without a link, look it up, newest first, at most this many.
+MAX_DETAIL_LOOKUPS = 50
 
 
 @dataclass
@@ -241,19 +244,32 @@ def _status(bot: dict) -> str:
 def find_bots_for_meeting(client: "MeetStreamClient", meeting_link: str) -> list[dict]:
     """Every bot on the account that joined `meeting_link`, newest first (as summarize_bot dicts)."""
     key = normalize_meeting_link(meeting_link)
-    matches: list[dict] = []
+    listed: list[dict] = []
     cursor, seen_cursors, seen_ids = None, set(), set()
     for _ in range(MAX_LIST_PAGES):
         page = client.list_bots(cursor=cursor)
         bots = [summarize_bot(b) for b in page.get("bots", [])]
-        new = [b for b in bots if b["bot_id"] not in seen_ids]
-        seen_ids.update(b["bot_id"] for b in bots)
-        matches += [b for b in new if b["meeting_link"] and normalize_meeting_link(b["meeting_link"]) == key]
+        new = [b for b in bots if b["bot_id"] and b["bot_id"] not in seen_ids]
+        seen_ids.update(b["bot_id"] for b in new)
+        listed += new
         cursor = page.get("nextCursor")
         # Stop at the last page, or if the API ignores our cursor parameter (same page again).
         if not page.get("hasNextPage") or not cursor or cursor in seen_cursors or not new:
             break
         seen_cursors.add(cursor)
+
+    # Fill in meeting links the list didn't include, from each bot's detail (newest bots first).
+    missing = sorted((b for b in listed if not b["meeting_link"]),
+                     key=lambda b: str(b.get("created_at") or ""), reverse=True)
+    for b in missing[:MAX_DETAIL_LOOKUPS]:
+        try:
+            detail = summarize_bot(client.get_bot_detail(b["bot_id"]))
+        except MeetStreamError:
+            continue  # one unreadable bot shouldn't stop the search
+        for k in ("meeting_link", "status", "created_at", "platform", "name"):
+            b[k] = b[k] or detail[k]
+
+    matches = [b for b in listed if b["meeting_link"] and normalize_meeting_link(b["meeting_link"]) == key]
     return sorted(matches, key=lambda b: str(b.get("created_at") or ""), reverse=True)
 
 
