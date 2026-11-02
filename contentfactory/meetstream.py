@@ -20,9 +20,12 @@ Behaviour worth knowing:
 
 from __future__ import annotations
 
+import re
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlsplit
 
 import httpx
 
@@ -33,6 +36,10 @@ class MeetStreamError(RuntimeError):
 
 class MeetStreamNotReady(MeetStreamError):
     """The bot is still in the meeting or post-call processing is running (HTTP 202)."""
+
+
+class RecordingLookupError(MeetStreamError):
+    """A pasted link or id doesn't lead to a usable recording. The user's input to fix, not an outage."""
 
 
 class MeetStreamClient:
@@ -150,6 +157,126 @@ def with_retry_when_processing(fn, *args, attempts: int = 10, wait_seconds: floa
             if i == attempts - 1:
                 raise
             time.sleep(wait_seconds)
+
+
+# ---------------------------------------------------------------- resolving links to recordings
+#
+# People paste whatever link they have. We accept three kinds of reference:
+#   1. a bare bot id                      "0c0f8353-ad37-43af-ac53-322f23d44743"
+#   2. any MeetStream URL containing one  "https://app.meetstream.ai/.../0c0f8353-ad37-..."
+#   3. the meeting link itself            "https://zoom.us/j/123?pwd=..." / Meet / Teams
+# (1) and (2) name the recording directly. (3) is resolved by finding the bot MeetStream sent
+# to that meeting, via List Bots, whose entries carry the meeting link.
+
+_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
+
+# Bot statuses (lowercased, no spaces/underscores) while the meeting is still going on. Statuses
+# from MeetStream's docs: Joining, InWaitingRoom, InMeeting, Recording, Stopped, NotAllowed, Denied, Done.
+IN_PROGRESS_STATUSES = {"scheduled", "joining", "inwaitingroom", "inmeeting", "recording", "active"}
+# Statuses where the bot never recorded anything.
+NO_RECORDING_STATUSES = {"notallowed", "denied", "failed", "error", "cancelled", "canceled"}
+# Anything else (Stopped, Done, or a status we don't know) is treated as "has a recording" and
+# tried; if the media isn't ready, ingest waits on MeetStream's 202 responses as usual.
+
+MAX_LIST_PAGES = 20  # List Bots pages to scan when matching a meeting link
+
+
+@dataclass
+class ResolvedRecording:
+    bot_id: str
+    resolved_from: str  # "bot_id" | "meetstream_url" | "meeting_link"
+    bot: dict | None = None  # summarize_bot() of the match, for meeting links
+    other_matches: list[dict] = field(default_factory=list)  # older bots for the same meeting
+
+
+def normalize_meeting_link(link: str) -> str | None:
+    """A comparable key for a Zoom / Google Meet / Teams link, or None if it isn't one.
+
+    Ignores scheme, `www.`, case, trailing slashes and the query string (Zoom's `?pwd=` and
+    tracking parameters vary between copies of the same invite), except for Teams, whose
+    links are long opaque paths that we compare after URL-decoding.
+    """
+    try:
+        u = urlsplit(link.strip())
+    except ValueError:
+        return None
+    host = (u.hostname or "").lower().removeprefix("www.")
+    path = unquote(u.path).rstrip("/")
+    if host == "meet.google.com":
+        return f"meet:{path.lower().strip('/')}" if path.strip("/") else None
+    if host == "zoom.us" or host.endswith(".zoom.us"):
+        m = re.search(r"/(?:j|w|wc|s)/(\d+)", path)  # personal and webinar join paths
+        return f"zoom:{m.group(1)}" if m else None
+    if host.endswith("teams.microsoft.com") or host.endswith("teams.live.com"):
+        return f"teams:{path.lower()}" if path else None
+    return None
+
+
+def classify_reference(ref: str) -> tuple[str, str]:
+    """`(kind, value)`: kind is "bot_id", "meetstream_url" or "meeting_link".
+
+    Raises RecordingLookupError for anything that is none of those (e.g. a YouTube link).
+    """
+    ref = ref.strip()
+    if not ref:
+        raise RecordingLookupError("Paste a MeetStream link, a meeting link, or a bot id.")
+    if "://" not in ref and " " not in ref and "/" not in ref:
+        return "bot_id", ref
+    host = (urlsplit(ref).hostname or "").lower()
+    if host == "meetstream.ai" or host.endswith(".meetstream.ai"):
+        m = _UUID.search(ref)
+        if not m:
+            raise RecordingLookupError("That MeetStream link doesn't contain a bot id. Open the recording in the "
+                                  "MeetStream dashboard and copy its link, or paste the meeting link instead.")
+        return "meetstream_url", m.group(0)
+    if normalize_meeting_link(ref):
+        return "meeting_link", ref
+    raise RecordingLookupError("Not a MeetStream link, a Zoom / Google Meet / Teams meeting link, or a bot id.")
+
+
+def _status(bot: dict) -> str:
+    return str(bot.get("status") or "").lower().replace(" ", "").replace("_", "")
+
+
+def find_bots_for_meeting(client: "MeetStreamClient", meeting_link: str) -> list[dict]:
+    """Every bot on the account that joined `meeting_link`, newest first (as summarize_bot dicts)."""
+    key = normalize_meeting_link(meeting_link)
+    matches: list[dict] = []
+    cursor, seen_cursors, seen_ids = None, set(), set()
+    for _ in range(MAX_LIST_PAGES):
+        page = client.list_bots(cursor=cursor)
+        bots = [summarize_bot(b) for b in page.get("bots", [])]
+        new = [b for b in bots if b["bot_id"] not in seen_ids]
+        seen_ids.update(b["bot_id"] for b in bots)
+        matches += [b for b in new if b["meeting_link"] and normalize_meeting_link(b["meeting_link"]) == key]
+        cursor = page.get("nextCursor")
+        # Stop at the last page, or if the API ignores our cursor parameter (same page again).
+        if not page.get("hasNextPage") or not cursor or cursor in seen_cursors or not new:
+            break
+        seen_cursors.add(cursor)
+    return sorted(matches, key=lambda b: str(b.get("created_at") or ""), reverse=True)
+
+
+def resolve_recording(client: "MeetStreamClient", ref: str) -> ResolvedRecording:
+    """Turn whatever the user pasted into the bot id whose recording we should process."""
+    kind, value = classify_reference(ref)
+    if kind != "meeting_link":
+        return ResolvedRecording(bot_id=value, resolved_from=kind)
+
+    bots = find_bots_for_meeting(client, value)
+    if not bots:
+        raise RecordingLookupError("No MeetStream bot has joined that meeting link on this account. Send a bot to the "
+                              "meeting first, or check you're using the same MeetStream API key.")
+    finished = [b for b in bots if _status(b) not in IN_PROGRESS_STATUSES | NO_RECORDING_STATUSES]
+    if finished:
+        # A recurring meeting link can have many recordings; take the newest finished one.
+        best = finished[0]
+        return ResolvedRecording(bot_id=best["bot_id"], resolved_from="meeting_link", bot=best,
+                                 other_matches=[b for b in bots if b is not best])
+    if not any(_status(b) in IN_PROGRESS_STATUSES for b in bots):
+        raise RecordingLookupError(f"MeetStream's bot for that meeting didn't record it (status: {bots[0]['status']}).")
+    raise RecordingLookupError(f"MeetStream's bot is still in that meeting (status: {bots[0]['status']}). "
+                          "Try again after the meeting ends.")
 
 
 def summarize_bot(bot: dict) -> dict:

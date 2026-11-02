@@ -50,6 +50,22 @@ Errors look like `{"detail": "<message>"}`, or a list of field errors for 422.
 
 ## MeetStream recordings
 
+### `GET /api/v1/meetstream/resolve?link=…`
+
+Which recording a pasted link refers to: a bot id, a MeetStream URL, or a Zoom / Meet / Teams meeting link. See [MEETSTREAM.md](MEETSTREAM.md#pointing-it-at-a-recording).
+
+```bash
+curl -G "$B/api/v1/meetstream/resolve" --data-urlencode "link=https://zoom.us/j/8812345678?pwd=abc"
+```
+
+```json
+{"bot_id": "bot_42", "resolved_from": "meeting_link",
+ "bot": {"bot_id": "bot_42", "status": "Stopped", "platform": "Zoom", "meeting_link": "https://us02web.zoom.us/j/8812345678?pwd=abc", "created_at": "2026-10-21T15:00:00Z", "…": "…"},
+ "other_matches": [{"bot_id": "bot_7", "status": "Stopped", "created_at": "2026-09-01T15:00:00Z", "…": "…"}]}
+```
+
+`resolved_from` is `bot_id`, `meetstream_url` or `meeting_link`; `bot` and `other_matches` are only filled for meeting links. Returns 422 with the reason if the link leads to no usable recording, and 502 if MeetStream fails.
+
 ### `GET /api/v1/meetstream/recordings`
 
 Query (all optional): `status`, `platform` (`GMeet` | `Zoom` | `Teams`), `date_from`, `date_to` (`YYYY-MM-DD`).
@@ -78,13 +94,21 @@ Returns 400 if `MEETSTREAM_API_KEY` isn't set, and 502 if MeetStream returns an 
 ### `POST /api/v1/content-factory/jobs`: package a MeetStream recording
 
 ```bash
+# By meeting link (or a MeetStream link, or a bot id): resolved to the meeting's recording
 curl -X POST $P/jobs -H 'Content-Type: application/json' -d '{
-  "source": {"type": "meetstream_recording", "recording_id": "0c0f8353-…", "title": "Building Production AI Agents"},
+  "source": {"type": "meetstream_recording", "link": "https://zoom.us/j/8812345678?pwd=abc", "title": "Building Production AI Agents"},
   "configuration": {"audience": "developers", "tone": "technical", "clip_count": 5, "blog_word_count": 1000}
+}'
+
+# By bot id
+curl -X POST $P/jobs -H 'Content-Type: application/json' -d '{
+  "source": {"type": "meetstream_recording", "recording_id": "0c0f8353-ad37-43af-ac53-322f23d44743"}
 }'
 ```
 
-- `source.recording_id` is the MeetStream bot id; `bot_id` is accepted as well.
+- Give **either** `source.link` **or** `source.recording_id`:
+  - `link` takes a bot id, any MeetStream URL containing one, or the meeting's own Zoom / Meet / Teams link. It's resolved before the job is created, and the job's `source` records `bot_id` and `resolved_from`. A link that leads nowhere returns **422** with the reason, and no job is created.
+  - `recording_id` (alias `bot_id`) is the MeetStream bot id, used as is.
 - `title` is optional. The default is "<Platform> recording <date>".
 - `configuration` is optional. Every field is described in [CONFIGURATION.md](CONFIGURATION.md#per-job-options-jobconfig).
 

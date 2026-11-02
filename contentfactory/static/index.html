@@ -104,7 +104,9 @@ details summary { cursor: pointer; color: var(--muted); font-size: 12px; }
       <div id="tab-ms">
         <div class="row"><button id="loadRecs">Load recordings</button><span id="recsNote" class="small muted"></span></div>
         <div id="recs" class="list" style="margin-top:8px; display:none"></div>
-        <label>Bot ID</label><input id="botId" placeholder="Pick a recording above, or paste a bot id">
+        <label>MeetStream link, meeting link, or bot id</label>
+        <input id="botId" placeholder="https://app.meetstream.ai/…, https://zoom.us/j/…, or a bot id">
+        <div id="resolveNote" class="small muted" style="margin-top:4px"></div>
       </div>
       <div id="tab-up" style="display:none">
         <label>Recording (MP4, MOV, WebM, MP3, WAV)</label><input id="upRec" type="file" accept=".mp4,.mov,.webm,.mkv,.mp3,.wav,.m4a">
@@ -200,7 +202,7 @@ $("#loadRecs").onclick = async () => {
     data.recordings.forEach(r => {
       const d = document.createElement("div");
       d.innerHTML = `<b>${esc(r.name || r.bot_id)}</b><div class="small muted">${esc(r.platform || "")} · ${esc(r.status || "")} · ${esc((r.created_at || "").slice(0, 16).replace("T", " "))}</div>`;
-      d.onclick = () => { box.querySelectorAll("div").forEach(x => x.classList.remove("sel")); d.classList.add("sel"); $("#botId").value = r.bot_id;
+      d.onclick = () => { box.querySelectorAll("div").forEach(x => x.classList.remove("sel")); d.classList.add("sel"); $("#botId").value = r.bot_id; $("#resolveNote").textContent = "";
         if (!$("#title").value) $("#title").value = r.name || ""; };
       box.append(d);
     });
@@ -208,6 +210,23 @@ $("#loadRecs").onclick = async () => {
 };
 
 // The job configuration from the form (a subset of JobConfig; the rest use server defaults).
+// Show which recording a pasted link resolves to, so the user knows before generating.
+$("#botId").addEventListener("change", async () => {
+  const link = $("#botId").value.trim(), note = $("#resolveNote");
+  if (!link) { note.textContent = ""; return; }
+  note.textContent = "Looking up the recording...";
+  try {
+    const r = await api("/api/v1/meetstream/resolve?link=" + encodeURIComponent(link));
+    if (r.resolved_from === "meeting_link") {
+      const b = r.bot, more = r.other_matches.length;
+      note.textContent = `Found: ${b.name || b.bot_id} · ${b.status || ""} · ${(b.created_at || "").slice(0, 16).replace("T", " ")}`
+        + (more ? ` (newest of ${more + 1} recordings of this meeting)` : "");
+    } else {
+      note.textContent = "Bot id " + r.bot_id;
+    }
+  } catch (e) { note.textContent = e.message; }
+});
+
 function config() {
   return { audience: $("#audience").value, tone: $("#tone").value, clip_count: +$("#clipCount").value,
     blog_word_count: +$("#blogWords").value, burn_captions: $("#burn").checked,
@@ -219,8 +238,9 @@ $("#go").onclick = async () => {
   try {
     let job;
     if ($("#tab-ms").style.display !== "none") {
-      const bot = $("#botId").value.trim(); if (!bot) throw new Error("Pick a MeetStream recording first.");
-      job = await api(P + "/jobs", { method: "POST", json: { source: { type: "meetstream_recording", recording_id: bot, title: $("#title").value || null }, configuration: config() } });
+      const link = $("#botId").value.trim(); if (!link) throw new Error("Pick a recording, or paste a MeetStream or meeting link.");
+      // The server accepts a bot id, a MeetStream URL or the meeting's own link, and resolves it.
+      job = await api(P + "/jobs", { method: "POST", json: { source: { type: "meetstream_recording", link, title: $("#title").value || null }, configuration: config() } });
     } else {
       const fd = new FormData();
       if ($("#upRec").files[0]) fd.append("recording", $("#upRec").files[0]);

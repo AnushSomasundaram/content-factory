@@ -21,7 +21,7 @@ Agent ──MCP──► MeetStream MCP (hosted)  list_bots, get_bot_detail, …
 | Tool | Arguments | Returns |
 |---|---|---|
 | `list_meetstream_recordings` | `status?`, `platform?` (`GMeet`/`Zoom`/`Teams`) | `[{bot_id, name, status, platform, created_at, …}]` |
-| `create_content_package` | `recording_id` (bot id), `title?`, `audience?`, `tone?`, `clip_count?` (5), `linkedin_post_count?` (4), `blog_word_count?` (1000), `include_visual_briefs?` (true) | Job summary (below) |
+| `create_content_package` | `recording` (bot id, MeetStream link, or the meeting's Zoom/Meet/Teams link), `title?`, `audience?`, `tone?`, `clip_count?` (5), `linkedin_post_count?` (4), `blog_word_count?` (1000), `include_visual_briefs?` (true) | Job summary (below) |
 | `get_content_package` | `job_id` | Job summary |
 | `list_package_assets` | `job_id`, `asset_type?` | `[{id, type, title, status, version, preview, qa_issues}]` |
 
@@ -83,7 +83,7 @@ MeetStream's MCP uses `Authorization: Bearer <key>`, while its REST API (used by
 
 > **You:** Find my Zoom recordings from this week and make a content package from the product webinar, for founders.
 >
-> **Agent:** calls `list_meetstream_recordings(platform="Zoom")` (or MeetStream's own `list_bots`), finds `bot_42` *"Product webinar"*, then calls `create_content_package(recording_id="bot_42", title="Product Webinar: Q4 Launch", audience="founders")`.
+> **Agent:** calls `list_meetstream_recordings(platform="Zoom")` (or MeetStream's own `list_bots`), finds `bot_42` *"Product webinar"*, then calls `create_content_package(recording="bot_42", title="Product Webinar: Q4 Launch", audience="founders")`. Passing the meeting's own link works too: `create_content_package(recording="https://zoom.us/j/8812345678")`.
 >
 > **Agent:** "Started job_7f3… I'll check on it." It calls `get_content_package` until `status` is `awaiting_review`.
 >

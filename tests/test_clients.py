@@ -9,7 +9,10 @@ import pytest
 
 from contentfactory.drafts import ChapterNames, JobConfig
 from contentfactory.generators import Chapter, ClaudeGenerator, GenContext, GenerationError
-from contentfactory.meetstream import MeetStreamClient, MeetStreamNotReady, summarize_bot
+from contentfactory.meetstream import (
+    MeetStreamClient, MeetStreamNotReady, RecordingLookupError, classify_reference, normalize_meeting_link,
+    resolve_recording, summarize_bot,
+)
 
 
 def claude_with(handler) -> ClaudeGenerator:
@@ -91,3 +94,85 @@ def test_meetstream_uses_token_auth_and_reports_processing():
     with pytest.raises(MeetStreamNotReady):
         client.get_video("b1")
     assert calls[0] == ("/api/v1/bots", "Token key123")
+
+
+# ---------------------------------------------------------------- resolving MeetStream links
+
+UUID = "0c0f8353-ad37-43af-ac53-322f23d44743"
+
+
+@pytest.mark.parametrize("a,b", [
+    ("https://zoom.us/j/1234567890?pwd=abc", "https://us02web.zoom.us/j/1234567890"),
+    ("https://meet.google.com/abc-defg-hij", "HTTPS://Meet.Google.com/abc-defg-hij/?authuser=1"),
+    ("https://teams.microsoft.com/l/meetup-join/19%3ameeting_X%40thread.v2/0?context=1",
+     "https://teams.microsoft.com/l/meetup-join/19:meeting_X@thread.v2/0"),
+])
+def test_meeting_links_normalize_to_the_same_key(a, b):
+    assert normalize_meeting_link(a) == normalize_meeting_link(b) is not None
+
+
+def test_classify_reference():
+    assert classify_reference(UUID) == ("bot_id", UUID)
+    assert classify_reference(f"https://app.meetstream.ai/bots/{UUID}?tab=video") == ("meetstream_url", UUID)
+    assert classify_reference(f"https://api.meetstream.ai/api/v1/bots/{UUID}/detail")[1] == UUID
+    assert classify_reference("https://meet.google.com/abc-defg-hij")[0] == "meeting_link"
+    with pytest.raises(RecordingLookupError, match="doesn't contain a bot id"):
+        classify_reference("https://app.meetstream.ai/dashboard")
+    with pytest.raises(RecordingLookupError, match="Not a MeetStream link"):
+        classify_reference("https://www.youtube.com/watch?v=x")
+
+
+def bots_client(pages: list[dict], calls: list | None = None) -> MeetStreamClient:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if calls is not None:
+            calls.append(dict(request.url.params))
+        i = min(len(calls or [None]) - 1, len(pages) - 1) if calls is not None else 0
+        return httpx.Response(200, json=pages[i])
+    return MeetStreamClient("k", transport=httpx.MockTransport(handler))
+
+
+LINK = "https://meet.google.com/abc-defg-hij"
+
+
+def bot(bot_id, status, created, link=LINK):
+    return {"bot_id": bot_id, "status": status, "meeting_link": link, "created_at": created}
+
+
+def test_meeting_link_resolves_to_newest_finished_recording():
+    page = {"bots": [bot("old", "Stopped", "2026-10-01T10:00:00Z"),
+                     bot("new", "Done", "2026-10-20T10:00:00Z"),
+                     bot("live", "InMeeting", "2026-10-27T10:00:00Z"),
+                     bot("other", "Done", "2026-10-25T10:00:00Z", link="https://zoom.us/j/999")],
+            "hasNextPage": False}
+    r = resolve_recording(bots_client([page]), LINK + "?authuser=0")
+    assert (r.bot_id, r.resolved_from) == ("new", "meeting_link")
+    assert {b["bot_id"] for b in r.other_matches} == {"old", "live"}
+
+
+def test_meeting_link_with_only_a_live_bot_or_a_denied_bot():
+    live = {"bots": [bot("b", "InMeeting", "2026-10-27T10:00:00Z")], "hasNextPage": False}
+    with pytest.raises(RecordingLookupError, match="still in that meeting"):
+        resolve_recording(bots_client([live]), LINK)
+    denied = {"bots": [bot("b", "NotAllowed", "2026-10-27T10:00:00Z")], "hasNextPage": False}
+    with pytest.raises(RecordingLookupError, match="didn't record it"):
+        resolve_recording(bots_client([denied]), LINK)
+    with pytest.raises(RecordingLookupError, match="No MeetStream bot has joined"):
+        resolve_recording(bots_client([{"bots": [], "hasNextPage": False}]), LINK)
+
+
+def test_meeting_link_search_follows_pages_and_stops_if_cursor_is_ignored():
+    calls: list = []
+    p1 = {"bots": [bot("a", "Done", "2026-10-01", link="https://zoom.us/j/1")], "hasNextPage": True, "nextCursor": "c1"}
+    p2 = {"bots": [bot("b", "Done", "2026-10-02")], "hasNextPage": True, "nextCursor": "c2"}
+    r = resolve_recording(bots_client([p1, p2, p2], calls), LINK)
+    assert r.bot_id == "b"
+    assert calls[1].get("cursor") == "c1"
+    assert len(calls) == 3  # third call returned page 2 again (no new bots), so it stopped
+
+
+def test_bot_id_and_meetstream_url_need_no_api_call():
+    def handler(request):
+        raise AssertionError("no API call expected")
+    client = MeetStreamClient("k", transport=httpx.MockTransport(handler))
+    assert resolve_recording(client, UUID).bot_id == UUID
+    assert resolve_recording(client, f"https://app.meetstream.ai/bots/{UUID}").resolved_from == "meetstream_url"

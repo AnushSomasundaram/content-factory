@@ -36,7 +36,12 @@ def fake_meetstream(video_bytes: bytes, calls: list):
         if path == "/api/v1/bots/bot_42/get_video":
             return httpx.Response(200, json={"video_url": "https://ms-s3-bucket.s3.amazonaws.com/rec.mp4", "video_info": {}})
         if path == "/api/v1/bots":
-            return httpx.Response(200, json={"bots": [{"bot_id": "bot_42", "status": "Stopped", "platform": "Zoom"}]})
+            return httpx.Response(200, json={"bots": [
+                {"bot_id": "bot_42", "status": "Stopped", "platform": "Zoom", "created_at": "2026-10-21T15:00:00Z",
+                 "meeting_link": "https://us02web.zoom.us/j/8812345678?pwd=abc"},
+                {"bot_id": "bot_7", "status": "Stopped", "platform": "Zoom", "created_at": "2026-09-01T15:00:00Z",
+                 "meeting_link": "https://zoom.us/j/8812345678"},
+            ], "hasNextPage": False})
         return httpx.Response(404, json={"message": "not found"})
     return httpx.MockTransport(handler)
 
@@ -123,6 +128,33 @@ def test_meetstream_recording_to_exported_package(env):
     assert clip_entry["approved_by"] == "ana"
     assert len(clip_entry["files"]["landscape"]["sha256"]) == 64
     assert manifest["consent"].startswith("ana: speakers signed release")
+
+
+def test_job_from_a_meeting_link_uses_that_meetings_recording(env):
+    client, calls = env
+    preview = client.get("/api/v1/meetstream/resolve", params={"link": "https://zoom.us/j/8812345678"}).json()
+    assert preview["bot_id"] == "bot_42" and preview["resolved_from"] == "meeting_link"
+    assert [b["bot_id"] for b in preview["other_matches"]] == ["bot_7"]  # older recording of the same meeting
+
+    r = client.post(f"{P}/jobs", json={"source": {"type": "meetstream_recording", "link": "https://zoom.us/j/8812345678?pwd=zzz"},
+                                       "configuration": CONFIG})
+    assert r.status_code == 202
+    assert r.json()["source"]["bot_id"] == "bot_42" and r.json()["source"]["resolved_from"] == "meeting_link"
+    job = wait(client, r.json()["job_id"])
+    assert job["status"] == "awaiting_review", job["error_message"]
+    assert job["webinar"]["source_ref"] == "bot_42"
+
+    # A MeetStream URL carrying the id goes straight to that bot.
+    r = client.get("/api/v1/meetstream/resolve",
+                   params={"link": "https://app.meetstream.ai/bots/0c0f8353-ad37-43af-ac53-322f23d44743"})
+    assert r.json()["resolved_from"] == "meetstream_url"
+
+    # Links that lead nowhere are refused up front with a reason (no job is created).
+    for bad, why in (("https://meet.google.com/zzz-zzzz-zzz", "No MeetStream bot has joined"),
+                     ("https://www.youtube.com/watch?v=x", "Not a MeetStream link")):
+        r = client.post(f"{P}/jobs", json={"source": {"type": "meetstream_recording", "link": bad}})
+        assert r.status_code == 422 and why in r.json()["detail"]
+    assert client.post(f"{P}/jobs", json={"source": {"type": "meetstream_recording"}}).status_code == 422
 
 
 def test_review_rules_are_enforced_by_the_backend(env, tiny_video, ms_transcript_json):

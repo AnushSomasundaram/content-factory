@@ -27,7 +27,7 @@ Check that it works:
 .venv/bin/python -m pytest -q
 ```
 
-You should see `25 passed`. The tests render real video with FFmpeg, so they take about 20 seconds.
+You should see `34 passed`. The tests render real video with FFmpeg, so they take about 20 seconds.
 
 ## Part 2: Make a sample webinar
 
@@ -104,7 +104,11 @@ set -a; source .env; set +a
    export MEETSTREAM_API_KEY=ms_...
    .venv/bin/uvicorn contentfactory.api:app --reload
    ```
-3. In the dashboard, on the **MeetStream recording** tab, click **Load recordings**. Pick a bot (a recorded meeting), give it a title and click **Generate**.
+3. In the dashboard, on the **MeetStream recording** tab, either:
+   - paste a link into **MeetStream link, meeting link, or bot id**. This can be the meeting's own Zoom / Google Meet / Teams link, a MeetStream link to the recording, or a bot id. A note shows which recording it found. Or:
+   - click **Load recordings** and pick a bot.
+
+   Give it a title and click **Generate**.
 
 The app fetches the bot's transcript and video, falling back to audio if there's no video, then runs the same pipeline.
 

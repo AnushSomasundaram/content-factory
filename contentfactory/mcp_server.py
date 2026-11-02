@@ -72,7 +72,7 @@ def list_meetstream_recordings(status: str | None = None, platform: Literal["GMe
 
 @server.tool()
 def create_content_package(
-    recording_id: str,
+    recording: str,
     title: str | None = None,
     audience: Literal["developers", "founders", "marketers", "general"] = "developers",
     tone: Literal["technical", "conversational", "educational", "thought_leadership", "company_blog"] = "technical",
@@ -81,13 +81,15 @@ def create_content_package(
     blog_word_count: int = 1000,
     include_visual_briefs: bool = True,
 ) -> dict:
-    """Start turning a MeetStream recording (its bot id) into a content package for human review.
+    """Start turning a MeetStream recording into a content package for human review.
 
+    `recording` can be a MeetStream bot id, a MeetStream link containing one, or the meeting's own
+    Zoom / Google Meet / Teams link (the newest finished MeetStream recording of it is used).
     Returns a job id immediately; generation runs in the background. Every asset lands in the review
     queue as PENDING_REVIEW and nothing is published.
     """
     body = {
-        "source": {"type": "meetstream_recording", "recording_id": recording_id, "title": title},
+        "source": {"type": "meetstream_recording", "link": recording, "title": title},
         "configuration": {
             "audience": audience, "tone": tone, "clip_count": clip_count, "linkedin_post_count": linkedin_post_count,
             "blog_word_count": blog_word_count, "generate_visual_briefs": include_visual_briefs,

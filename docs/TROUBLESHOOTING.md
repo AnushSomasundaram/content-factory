@@ -19,7 +19,10 @@ A failed job shows `error_message` as `"<stage>: <reason>"`, both in the dashboa
 | `error_message` | Cause | Fix |
 |---|---|---|
 | `…: forbidden (check MEETSTREAM_API_KEY, …)` | Wrong key, or the bot belongs to another MeetStream account | Check the key at app.meetstream.ai |
-| `…: not found` | Wrong bot id | Copy it from "Load recordings" |
+| `…: not found` | Wrong bot id | Copy it from "Load recordings", or paste the meeting link instead |
+| `No MeetStream bot has joined that meeting link on this account…` | No bot recorded that meeting, or it was recorded with a different MeetStream key | Check the API key; if a bot did record it, paste its bot id instead |
+| `MeetStream's bot is still in that meeting…` | The meeting hasn't ended | Wait until the bot leaves, then try again |
+| `Not a MeetStream link, a Zoom / Google Meet / Teams meeting link, or a bot id.` | Some other kind of link | Paste the meeting's join link or the MeetStream recording link |
 | `…: no transcript (transcription was not enabled, …)` | The bot had no post-call transcription provider, or never got into the meeting | Run transcription afterwards with MeetStream's `transcribe_audio` tool (or REST equivalent), then retry; for future bots set `recording_config.transcript.provider` |
 | `…: still processing` | MeetStream is still processing after ~2 minutes of waiting | Retry in a few minutes |
 | `Download failed: HTTP 403` | Presigned link expired (they last ~1 hour) | Retry; a fresh link is fetched |

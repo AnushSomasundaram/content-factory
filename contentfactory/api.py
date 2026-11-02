@@ -32,14 +32,14 @@ from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from . import review
 from .config import Settings, load_settings
 from .db import Store, new_id
 from .drafts import JobConfig
 from .export import ExportError, build_package
-from .meetstream import MeetStreamError, summarize_bot
+from .meetstream import MeetStreamError, RecordingLookupError, resolve_recording, summarize_bot
 from .pipeline import REGENERABLE, STAGES, ContentFactory, PipelineError
 
 STATIC = Path(__file__).parent / "static"
@@ -54,12 +54,24 @@ ALLOWED_TRANSCRIPTS = {".json", ".srt", ".vtt"}
 
 
 class MeetStreamSource(BaseModel):
-    """`recording_id` (as in the product spec) and `bot_id` are accepted interchangeably."""
+    """Which MeetStream recording to process. Give either:
+
+    * `recording_id` (or `bot_id`): the MeetStream bot id, or
+    * `link`: a MeetStream URL containing the bot id, the meeting's own Zoom / Google Meet /
+      Teams link (we find the bot that recorded it), or a bare bot id.
+    """
 
     type: Literal["meetstream_recording"]
-    bot_id: str = Field(min_length=1, alias="recording_id")
+    bot_id: str | None = Field(default=None, alias="recording_id")
+    link: str | None = None
     title: str | None = None
     model_config = {"populate_by_name": True}
+
+    @model_validator(mode="after")
+    def _one_reference(self):
+        if not (self.bot_id or (self.link or "").strip()):
+            raise ValueError("Give either recording_id (the MeetStream bot id) or link.")
+        return self
 
 
 class CreateJob(BaseModel):
@@ -175,11 +187,38 @@ def create_app(settings: Settings | None = None, factory: ContentFactory | None 
 
     # ------------------------------------------------------------ jobs
 
+    def resolve(ref: str):
+        """Resolve a pasted link/id to a recording, mapping failures to HTTP errors."""
+        try:
+            client = factory.meetstream()
+        except MeetStreamError as e:
+            raise HTTPException(400, str(e))
+        try:
+            return resolve_recording(client, ref)
+        except RecordingLookupError as e:  # the link doesn't lead to a recording: the user's to fix
+            raise HTTPException(422, str(e))
+        except MeetStreamError as e:  # MeetStream refused or failed
+            raise HTTPException(502, str(e))
+        finally:
+            client.close()
+
+    @app.get("/api/v1/meetstream/resolve", dependencies=guarded)
+    def resolve_link(link: str) -> dict:
+        """Preview which recording a pasted link refers to, before starting a job."""
+        r = resolve(link)
+        return {"bot_id": r.bot_id, "resolved_from": r.resolved_from, "bot": r.bot,
+                "other_matches": r.other_matches}
+
     @app.post(f"{P}/jobs", status_code=202, dependencies=guarded)
     def create_job(body: CreateJob) -> dict:
         if not settings.meetstream_api_key:
             raise HTTPException(400, "MEETSTREAM_API_KEY is not configured on the server.")
-        job = factory.submit(body.source.model_dump(), body.configuration)
+        source = body.source.model_dump()
+        if body.source.link:
+            # Resolve now, so a link that matches no recording fails immediately rather than in a job.
+            r = resolve(body.source.link)
+            source.update(bot_id=r.bot_id, resolved_from=r.resolved_from)
+        job = factory.submit(source, body.configuration)
         return job_view(job)
 
     @app.post(f"{P}/uploads", status_code=202, dependencies=guarded)

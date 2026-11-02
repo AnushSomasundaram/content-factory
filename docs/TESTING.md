@@ -13,8 +13,8 @@ The suite needs FFmpeg (the end-to-end tests render real clips). It needs **no n
 |---|---|
 | `tests/test_ingest.py` | MeetStream segment-list and participant-keyed formats, SRT with speaker prefixes, VTT voice tags, empty transcripts, caption cue timing and format |
 | `tests/test_validate.py` | Quote verification (exact, spanning segments, paraphrase rejected, wrong citation corrected), clip snapping/padding/scoring, topic-change and length trimming, unknown ids, overlap and score filtering, citation resolution, sensitive-content flags, chapter boundaries on the sample, the review state machine |
-| `tests/test_clients.py` | Claude request shape (model, adaptive thinking, effort, structured output schema, prompt caching on the transcript, refusal fallback, no sampling params), structured parsing, refusal → readable error, auth error; MeetStream `Token` auth, 202 handling, bot summaries |
-| `tests/test_api.py` | Full runs through the HTTP API, with a fake MeetStream bot and an upload: real FFmpeg renders, every asset type, the review rules, edits re-rendering clips, verbatim enforcement, consent and approval gates, ZIP contents and manifest; an upload with no audio; bad file types; API token auth |
+| `tests/test_clients.py` | Claude request shape (model, adaptive thinking, effort, structured output schema, prompt caching on the transcript, refusal fallback, no sampling params), structured parsing, refusal → readable error, auth error; MeetStream `Token` auth, 202 handling, bot summaries; resolving links (meeting-link normalisation across Zoom/Meet/Teams variants, MeetStream URLs, newest finished recording wins, live, denied and unmatched meetings, pagination that stops if the cursor is ignored) |
+| `tests/test_api.py` | Full runs through the HTTP API, with a fake MeetStream bot and an upload: real FFmpeg renders, a job started from a Zoom link (and links refused with a reason), every asset type, the review rules, edits re-rendering clips, verbatim enforcement, consent and approval gates, ZIP contents and manifest; an upload with no audio; bad file types; API token auth |
 
 ## Fixtures
 

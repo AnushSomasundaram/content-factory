@@ -4,6 +4,42 @@
 
 In MeetStream terms, **a bot is one recorded meeting**, so in this app a *recording id* is a MeetStream *bot id*.
 
+## Pointing it at a recording
+
+Paste any of these into the dashboard's **MeetStream link, meeting link, or bot id** box, the API's `source.link`, or the MCP tool's `recording` argument:
+
+| You paste | Example | What happens |
+|---|---|---|
+| A bot id | `0c0f8353-ad37-43af-ac53-322f23d44743` | Used directly |
+| A MeetStream link | `https://app.meetstream.ai/…/0c0f8353-ad37-…` (dashboard, API or any `*.meetstream.ai` URL) | The bot id is taken from the URL |
+| The meeting's own link | `https://zoom.us/j/8812345678?pwd=…`, `https://meet.google.com/abc-defg-hij`, a Teams join link | The app finds the bot MeetStream sent to that meeting and uses its recording |
+
+**How meeting links are matched.** The app reads your bots (`GET /bots`, following pages) and compares each bot's `meeting_link` with yours. The comparison ignores the differences between copies of the same invite:
+
+| Platform | Two links count as the same meeting if… |
+|---|---|
+| Zoom | they have the same meeting number (`/j/<number>`), whatever the subdomain (`us02web.zoom.us`) or `?pwd=` |
+| Google Meet | they have the same meeting code, ignoring case and query parameters |
+| Teams | they have the same join path, after URL-decoding |
+
+**When several bots match** (a recurring meeting link), the **newest** one that has finished is used. The dashboard says *"newest of N recordings of this meeting"*, and the API returns the others as `other_matches`. To pick an older one, paste its bot id instead.
+
+**When the link can't be used,** the job is refused immediately with the reason, and nothing is queued:
+
+| Situation | Message |
+|---|---|
+| No bot on this account joined that meeting | *No MeetStream bot has joined that meeting link on this account…* |
+| The bot is still in the meeting | *MeetStream's bot is still in that meeting (status: InMeeting). Try again after the meeting ends.* |
+| The bot was refused entry | *MeetStream's bot for that meeting didn't record it (status: NotAllowed).* |
+| A MeetStream URL with no bot id in it | *That MeetStream link doesn't contain a bot id…* |
+| Anything else, e.g. a YouTube link | *Not a MeetStream link, a Zoom / Google Meet / Teams meeting link, or a bot id.* |
+
+Bot statuses that mean "still going" are `Scheduled`, `Joining`, `InWaitingRoom`, `InMeeting` and `Recording`. `NotAllowed`, `Denied` and failure statuses mean "no recording". Anything else, such as `Stopped`, `Done` or a status we don't know, is treated as finished. If its media isn't ready yet, ingest waits on MeetStream's 202 responses as usual.
+
+To check what a link resolves to without starting a job, call `GET /api/v1/meetstream/resolve?link=…`. The dashboard does this when you paste a link.
+
+> This app finds recordings MeetStream has already made. It doesn't send bots into meetings. To record a new meeting, create a bot with MeetStream (see [below](#setting-up-bots-for-the-content-factory)), then paste the meeting link here once it's over.
+
 ## Setup
 
 1. Create an API key at https://app.meetstream.ai/api-key.
@@ -21,6 +57,7 @@ All calls go to `https://api.meetstream.ai/api/v1` (override with `MEETSTREAM_BA
 | When | Call | MeetStream MCP equivalent | Used for |
 |---|---|---|---|
 | "Load recordings" in the dashboard | `GET /bots?status=&platform=&from=&to=` | `list_bots` | Picking a bot |
+| A meeting link is pasted | `GET /bots` (all pages, up to 20) | `list_bots` | Finding the bot that recorded that meeting |
 | Ingest step 1 | `GET /bots/{bot_id}/detail` | `get_bot_detail` | Platform and date for the default title |
 | Ingest step 2 | `GET /bots/{bot_id}/get_transcript` | `get_transcript` | The speaker-labelled transcript |
 | Ingest step 3 | `GET /bots/{bot_id}/get_video` | `get_media_urls` (`kind: video`) | Presigned MP4 URL |
@@ -109,7 +146,7 @@ curl -X POST https://api.meetstream.ai/api/v1/bots/create_bot \
 
 ## Known limits
 
-- **Pagination.** `GET /bots` returns `nextCursor`, but the docs don't name the query parameter that takes it back. The client sends `cursor`, which is **unverified**, and the dashboard only shows the first page. Use the date and status filters to narrow the list.
+- **Pagination.** `GET /bots` returns `nextCursor`, but the docs don't name the query parameter that takes it back. The client sends `cursor`, which is **unverified**. Meeting-link lookup follows pages, and stops if the API returns a page it has already seen. So if `cursor` turns out to be wrong, it still searches the first page rather than looping. The dashboard's "Load recordings" list shows only the first page. A bot id or MeetStream link always works, whatever the pagination.
 - **Per-participant streams** (`get_audio_streams`, `get_recording_streams`) aren't used. Speaker tracking for portrait crops would build on them later.
 - **In-meeting chat and participant lists** aren't used. Q&A extraction from chat is a planned extension.
 - **Webhooks.** There are no webhooks yet; a job is started by a person or agent. Listening for `bot.stopped` / `video.processed` to start jobs automatically is the natural next step.

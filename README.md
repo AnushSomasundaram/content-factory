@@ -29,7 +29,7 @@ Without an API key the app runs in **offline mode**: it builds drafts by rearran
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...      # Claude writes the content
-export MEETSTREAM_API_KEY=ms_...         # "Load recordings" pulls your MeetStream bots
+export MEETSTREAM_API_KEY=ms_...         # paste a MeetStream link, the meeting's Zoom/Meet/Teams link, or a bot id
 .venv/bin/uvicorn contentfactory.api:app --reload
 ```
 
