@@ -31,7 +31,14 @@ import httpx
 
 
 class MeetStreamError(RuntimeError):
-    """Any failure talking to MeetStream, with a message that says what to check."""
+    """Any failure talking to MeetStream, with a message that says what to check.
+
+    `status` is MeetStream's HTTP status code when the failure was an error response.
+    """
+
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status
 
 
 class MeetStreamNotReady(MeetStreamError):
@@ -71,14 +78,14 @@ class MeetStreamClient:
         if r.status_code == 202:
             raise MeetStreamNotReady(f"{path}: still processing")
         if r.status_code == 403:
-            raise MeetStreamError(f"{path}: forbidden (check MEETSTREAM_API_KEY, or the bot belongs to another account)")
+            raise MeetStreamError(f"{path}: forbidden (check MEETSTREAM_API_KEY, or the bot belongs to another account)", 403)
         if r.status_code == 404:
-            raise MeetStreamError(f"{path}: not found")
+            raise MeetStreamError(f"{path}: not found", 404)
         if r.status_code == 409:
             # Documented for transcripts: transcription wasn't enabled on the bot, or it never got in.
-            raise MeetStreamError(f"{path}: no transcript (transcription was not enabled, or the bot was never admitted)")
+            raise MeetStreamError(f"{path}: no transcript (transcription was not enabled, or the bot was never admitted)", 409)
         if r.status_code >= 400:
-            raise MeetStreamError(f"{path}: HTTP {r.status_code} {r.text[:200]}")
+            raise MeetStreamError(f"{path}: HTTP {r.status_code} {r.text[:200]}", r.status_code)
         return r.json()
 
     # ------------------------------------------------------------ bots
@@ -165,7 +172,7 @@ def with_retry_when_processing(fn, *args, attempts: int = 10, wait_seconds: floa
 #   1. a bare bot id                      "0c0f8353-ad37-43af-ac53-322f23d44743"
 #   2. any MeetStream URL containing one  "https://app.meetstream.ai/.../0c0f8353-ad37-..."
 #   3. the meeting link itself            "https://zoom.us/j/123?pwd=..." / Meet / Teams
-# (1) and (2) name the recording directly. (3) is resolved by finding the bot MeetStream sent
+# (1) and (2) name the recording directly; we still check it with Get Bot Details. (3) is resolved by finding the bot MeetStream sent
 # to that meeting, via List Bots, whose entries carry the meeting link.
 
 _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I)
@@ -274,10 +281,28 @@ def find_bots_for_meeting(client: "MeetStreamClient", meeting_link: str) -> list
 
 
 def resolve_recording(client: "MeetStreamClient", ref: str) -> ResolvedRecording:
-    """Turn whatever the user pasted into the bot id whose recording we should process."""
+    """Turn whatever the user pasted into the bot id whose recording we should process.
+
+    Checked against MeetStream before any job exists, so a wrong id, another account's bot or
+    a meeting that is still going on is reported straight away instead of as a failed job.
+    """
     kind, value = classify_reference(ref)
     if kind != "meeting_link":
-        return ResolvedRecording(bot_id=value, resolved_from=kind)
+        try:
+            detail = client.get_bot_detail(value)
+        except MeetStreamError as e:
+            if e.status == 404:
+                raise RecordingLookupError(
+                    f"MeetStream has no recording with the id {value} on this account. Check the id, and that "
+                    "MEETSTREAM_API_KEY is a key for the MeetStream account that recorded it.") from e
+            if e.status == 403:
+                raise RecordingLookupError(
+                    f"Recording {value} belongs to a different MeetStream account than MEETSTREAM_API_KEY.") from e
+            raise
+        bot = summarize_bot(detail)
+        bot["bot_id"] = bot["bot_id"] or value
+        _check_has_recording(bot)
+        return ResolvedRecording(bot_id=value, resolved_from=kind, bot=bot)
 
     bots = find_bots_for_meeting(client, value)
     if not bots:
@@ -289,10 +314,17 @@ def resolve_recording(client: "MeetStreamClient", ref: str) -> ResolvedRecording
         best = finished[0]
         return ResolvedRecording(bot_id=best["bot_id"], resolved_from="meeting_link", bot=best,
                                  other_matches=[b for b in bots if b is not best])
-    if not any(_status(b) in IN_PROGRESS_STATUSES for b in bots):
-        raise RecordingLookupError(f"MeetStream's bot for that meeting didn't record it (status: {bots[0]['status']}).")
-    raise RecordingLookupError(f"MeetStream's bot is still in that meeting (status: {bots[0]['status']}). "
-                          "Try again after the meeting ends.")
+    _check_has_recording(bots[0])  # newest bot: still in the meeting, or never recorded it
+    raise RecordingLookupError("MeetStream has no finished recording of that meeting yet.")
+
+
+def _check_has_recording(bot: dict) -> None:
+    """Raise RecordingLookupError if this bot is still in its meeting, or never recorded it."""
+    if _status(bot) in IN_PROGRESS_STATUSES:
+        raise RecordingLookupError(f"MeetStream's bot is still in that meeting (status: {bot['status']}). "
+                                   "Try again after the meeting ends.")
+    if _status(bot) in NO_RECORDING_STATUSES:
+        raise RecordingLookupError(f"MeetStream's bot for that meeting didn't record it (status: {bot['status']}).")
 
 
 def summarize_bot(bot: dict) -> dict:

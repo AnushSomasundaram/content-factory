@@ -5,7 +5,7 @@ Run:  uvicorn contentfactory.api:app --reload      (then open http://127.0.0.1:8
 Route groups (full reference with examples in docs/API.md):
   /api/v1/health                          mode, model, whether MeetStream/auth are configured
   /api/v1/meetstream/recordings           MeetStream bots to pick from
-  /api/v1/content-factory/jobs...         create (MeetStream or upload), poll, retry, transcript,
+  /api/v1/content-factory/jobs...         create from a MeetStream recording, poll, retry, transcript,
                                           recording, consent, export
   /api/v1/content-factory/assets/...      read, edit (PATCH), approve / reject / request-changes /
                                           reopen / regenerate, files
@@ -17,7 +17,7 @@ pipeline runs in the background. The exceptions are a clip edit (re-renders one 
 and "regenerate" (one model call), which are synchronous so the reviewer sees the result.
 
 Error mapping: ReviewError / ExportError / retry-not-allowed -> 409, schema errors -> 422,
-bad input -> 400, unsupported upload type -> 415, MeetStream unreachable -> 502.
+bad input -> 400, MeetStream unreachable -> 502.
 """
 
 from __future__ import annotations
@@ -25,27 +25,23 @@ from __future__ import annotations
 import json
 import os
 import secrets
-import shutil
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from . import review
 from .config import Settings, load_settings
-from .db import Store, new_id
+from .db import Store
 from .drafts import JobConfig
 from .export import ExportError, build_package
 from .meetstream import MeetStreamError, RecordingLookupError, resolve_recording, summarize_bot
 from .pipeline import REGENERABLE, STAGES, ContentFactory, PipelineError
 
 STATIC = Path(__file__).parent / "static"
-# Upload allow-lists, by extension. FFmpeg would accept more, but these are what we test.
-ALLOWED_MEDIA = {".mp4", ".mov", ".webm", ".mkv", ".mp3", ".wav", ".m4a"}
-ALLOWED_TRANSCRIPTS = {".json", ".srt", ".vtt"}
 
 
 # ---------------------------------------------------------------- request bodies
@@ -164,7 +160,7 @@ def create_app(settings: Settings | None = None, factory: ContentFactory | None 
 
     @app.get("/api/v1/health")
     def health() -> dict:
-        return {"ok": True, "llm_mode": settings.llm_mode, "model": settings.model if settings.llm_mode == "claude" else None,
+        return {"ok": True, "llm_mode": settings.llm_mode, "model": settings.model if settings.llm_mode == "openai" else None,
                 "meetstream_configured": bool(settings.meetstream_api_key), "auth_required": bool(api_token)}
 
     # ------------------------------------------------------------ MeetStream recordings
@@ -214,44 +210,22 @@ def create_app(settings: Settings | None = None, factory: ContentFactory | None 
         if not settings.meetstream_api_key:
             raise HTTPException(400, "MEETSTREAM_API_KEY is not configured on the server.")
         source = body.source.model_dump()
-        if body.source.link:
-            # Resolve now, so a link that matches no recording fails immediately rather than in a job.
-            r = resolve(body.source.link)
-            source.update(bot_id=r.bot_id, resolved_from=r.resolved_from)
+        # Resolve now, so a reference that leads to no recording fails immediately rather than in a job.
+        r = resolve(body.source.link or body.source.bot_id)
+        source.update(bot_id=r.bot_id, resolved_from=r.resolved_from)
         job = factory.submit(source, body.configuration)
         return job_view(job)
 
-    @app.post(f"{P}/uploads", status_code=202, dependencies=guarded)
-    def upload_job(recording: UploadFile | None = File(default=None), transcript: UploadFile | None = File(default=None),
-                   title: str = Form(default="Untitled webinar"), configuration: str = Form(default="{}")) -> dict:
-        if recording is None and transcript is None:
-            raise HTTPException(400, "Upload a recording, a transcript, or both.")
-        try:
-            config = JobConfig.model_validate(json.loads(configuration or "{}"))
-        except (json.JSONDecodeError, ValidationError) as e:
-            raise HTTPException(422, f"Invalid configuration: {e}")
-        updir = settings.data_dir / "uploads" / new_id("up")
-        updir.mkdir(parents=True, exist_ok=True)
-        source: dict[str, Any] = {"type": "upload", "title": title}
-        for f, allowed, key in ((recording, ALLOWED_MEDIA, "recording_path"), (transcript, ALLOWED_TRANSCRIPTS, "transcript_path")):
-            if f is None:
-                continue
-            ext = Path(f.filename or "").suffix.lower()
-            if ext not in allowed:
-                raise HTTPException(415, f"{f.filename}: unsupported type (allowed: {', '.join(sorted(allowed))})")
-            dest = updir / f"{key.split('_')[0]}{ext}"
-            with dest.open("wb") as out:
-                shutil.copyfileobj(f.file, out)
-            source[key] = str(dest)
-            if key == "recording_path":
-                source["filename"] = f.filename
-        return job_view(factory.submit(source, config))
-
     @app.get(f"{P}/jobs", dependencies=guarded)
     def list_jobs() -> list[dict]:
-        return [{"job_id": j["id"], "status": j["status"], "progress": j["progress"], "title": j["webinar_title"]
-                 or j["source"].get("title") or j["source"].get("bot_id"), "created_at": j["created_at"]}
-                for j in store.list_jobs()]
+        def summary(j: dict) -> dict:
+            statuses = [a["status"] for a in store.list_assets(j["id"])]
+            return {"job_id": j["id"], "status": j["status"], "progress": j["progress"], "title": j["webinar_title"]
+                    or j["source"].get("title") or j["source"].get("bot_id"), "created_at": j["created_at"],
+                    # Review progress, so a package list can show "5 of 29 approved" without loading assets.
+                    "assets": len(statuses), "approved": statuses.count(review.APPROVED),
+                    "to_review": statuses.count(review.PENDING_REVIEW)}
+        return [summary(j) for j in store.list_jobs()]
 
     @app.get(f"{P}/jobs/{{job_id}}", dependencies=guarded)
     def get_job(job_id: str) -> dict:

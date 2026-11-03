@@ -27,28 +27,29 @@ def test_meetstream_participant_keyed_format():
                   {"text": "Next", "start_timestamp": {"relative": 2.0}, "end_timestamp": {"relative": 2.3}},
                   {"text": "point.", "start_timestamp": {"relative": 2.3}, "end_timestamp": {"relative": 2.7}}],
     }]
-    t = parse_transcript("w", json.dumps(data), "t.json")
+    t = parse_transcript("w", json.dumps(data))
     assert [s.text for s in t.segments] == ["Hello there.", "Next point."]
     assert t.segments[1].start == 2.0 and t.segments[0].speaker == "Ana"
 
 
-def test_srt_with_speaker_prefix_and_proportional_split():
-    srt = "1\n00:00:01,000 --> 00:00:09,000\nDev: First idea here. Second idea follows.\n\n2\n00:00:10,000 --> 00:00:12,000\nThanks.\n"
-    t = parse_transcript("w", srt, "talk.srt")
-    assert [s.speaker for s in t.segments] == ["Dev", "Dev", "Speaker"]
+def test_meetstream_transcript_without_word_timings_is_split_proportionally():
+    # Some transcription providers return utterances without words; sentence times are then shared out.
+    data = [{"speaker": "Dev", "transcript": "First idea here. Second idea follows.", "start_time": 1.0, "end_time": 9.0},
+            {"speaker": "Maya", "transcript": "Thanks.", "start_time": 10.0, "end_time": 12.0}]
+    t = parse_transcript("w", json.dumps(data))
+    assert [s.speaker for s in t.segments] == ["Dev", "Dev", "Maya"]
     assert t.segments[0].text == "First idea here."
     assert t.segments[1].end == pytest.approx(9.0)
 
 
-def test_vtt_voice_tags_set_the_speaker():
-    vtt = "WEBVTT\n\n00:01.000 --> 00:04.000\n<v Maya Chen>Hello <i>there</i>.\n"
-    t = parse_transcript("w", vtt, "talk.vtt")
-    assert (t.segments[0].speaker, t.segments[0].text) == ("Maya Chen", "Hello there.")
+def test_non_json_transcript_is_a_clear_error():
+    with pytest.raises(TranscriptError, match="not valid JSON"):
+        parse_transcript("w", "1\n00:00:01,000 --> 00:00:02,000\nHi.\n")
 
 
 def test_empty_transcript_is_a_clear_error():
     with pytest.raises(TranscriptError, match="no speech"):
-        parse_transcript("w", "[]", "t.json")
+        parse_transcript("w", "[]")
 
 
 def test_captions_are_relative_to_clip_and_well_formed(transcript):

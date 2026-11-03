@@ -1,6 +1,6 @@
 # Documentation
 
-New here? Start with the **[Quick start](QUICKSTART.md)**: about 10 minutes from clone to an exported content package, with no API keys needed.
+New here? Start with the **[Quick start](QUICKSTART.md)**: about 10 minutes from clone to an exported content package, with no API keys needed (a local MeetStream stand-in serves a sample webinar).
 
 | Doc | Read it when you want to… |
 |---|---|
@@ -8,7 +8,7 @@ New here? Start with the **[Quick start](QUICKSTART.md)**: about 10 minutes from
 | [Architecture](ARCHITECTURE.md) | understand how the pieces fit, the data model, and why it's built this way |
 | [Pipeline](PIPELINE.md) | know exactly what each stage does: chapter detection, clip selection, quote checks, rendering |
 | [MeetStream integration](MEETSTREAM.md) | import recordings from MeetStream, and set up bots so their recordings work well here |
-| [Generation with Claude](GENERATION.md) | understand or change the prompts, model settings, caching and the offline generator |
+| [Generation with OpenAI](GENERATION.md) | understand or change the prompts, model settings, caching and the offline generator |
 | [Review and export](REVIEW_AND_EXPORT.md) | learn the review rules, what each edit does, and what's in the exported ZIP |
 | [API reference](API.md) | call the HTTP API directly (every endpoint, with curl examples) |
 | [MCP server](MCP.md) | let an AI agent create content packages from MeetStream recordings |
@@ -18,7 +18,7 @@ New here? Start with the **[Quick start](QUICKSTART.md)**: about 10 minutes from
 
 ## The product in one paragraph
 
-You give it a recorded webinar, either a MeetStream bot or an uploaded file. It produces:
+You give it a webinar recorded by MeetStream (the only source of recordings and transcripts). It produces:
 - chapters;
 - short video clips with captions, in landscape and portrait;
 - a blog draft;
@@ -35,10 +35,10 @@ contentfactory/
   api.py           HTTP API + serves the dashboard              -> API.md
   pipeline.py      job stages, retries, review actions          -> PIPELINE.md, REVIEW_AND_EXPORT.md
   ir.py            transcript segments + source references     -> ARCHITECTURE.md
-  ingest.py        transcript parsers (MeetStream, SRT, VTT)    -> PIPELINE.md
+  ingest.py        MeetStream transcript parsers                -> PIPELINE.md
   meetstream.py    MeetStream REST client                       -> MEETSTREAM.md
   segmentation.py  chapter boundary detection                   -> PIPELINE.md
-  generators.py    Claude + offline generators, prompts         -> GENERATION.md
+  generators.py    OpenAI + offline generators, prompts         -> GENERATION.md
   drafts.py        structured output schemas, JobConfig         -> GENERATION.md, CONFIGURATION.md
   validate.py      QA: clips, quotes, citations, sensitive text -> PIPELINE.md
   media.py         FFmpeg probing and rendering                 -> PIPELINE.md
@@ -50,5 +50,6 @@ contentfactory/
   config.py        environment settings                         -> CONFIGURATION.md
   static/index.html  review dashboard
 scripts/make_sample.py   builds the sample webinar
+scripts/demo_meetstream.py   local MeetStream stand-in that serves the sample  -> QUICKSTART.md
 tests/                   unit + end-to-end tests                -> TESTING.md
 ```

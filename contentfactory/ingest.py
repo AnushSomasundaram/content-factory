@@ -1,11 +1,10 @@
-"""Turn whatever transcript we were given into the sentence-level IR (see `ir.py`).
+"""Turn a MeetStream transcript into the sentence-level IR (see `ir.py`).
 
-Accepted inputs:
-  * MeetStream segment-list transcripts (`speaker`, `transcript`, `start_time`, `end_time`, `words`)
-  * MeetStream participant-keyed transcripts (`participant.name`, `words[].start_timestamp.relative`)
-  * Our own IR JSON (`{"webinar_id": ..., "segments": [...]}`), e.g. a re-imported transcript.json
-  * SRT / WebVTT, with an optional `Speaker: ` prefix (or `<v Speaker>` voice tag) on each cue
-  * Media with no transcript, via faster-whisper when it is installed
+MeetStream is the only source of transcripts. Its API returns one of two shapes, depending
+on the transcription provider, and we also re-read our own saved IR:
+  * segment-list transcripts (`speaker`, `transcript`, `start_time`, `end_time`, `words`)
+  * participant-keyed transcripts (`participant.name`, `words[].start_timestamp.relative`)
+  * our own IR JSON (`{"webinar_id": ..., "segments": [...]}`), e.g. a saved transcript.json
 
 Every input goes through the same two steps:
 
@@ -23,7 +22,6 @@ from __future__ import annotations
 
 import json
 import re
-from pathlib import Path
 from typing import Any
 
 from .ir import Segment, Transcript, Word
@@ -117,42 +115,6 @@ def _utterances_from_json(data: Any) -> list[_Utterance]:
     return out
 
 
-# "00:01:02,500 --> 00:01:05,000" (SRT) or "01:02.500 --> 01:05.000" (VTT, hours optional)
-_CUE_TIME = re.compile(
-    r"(?:(\d+):)?(\d{1,2}):(\d{2})[.,](\d{1,3})\s*-->\s*(?:(\d+):)?(\d{1,2}):(\d{2})[.,](\d{1,3})"
-)
-
-
-def _t(h, m, s, ms) -> float:
-    """Cue timestamp parts to seconds. `ms` may be 1-3 digits ("5" means 500 ms)."""
-    return int(h or 0) * 3600 + int(m) * 60 + int(s) + int(ms.ljust(3, "0")) / 1000
-
-
-def _utterances_from_cues(text: str) -> list[_Utterance]:
-    """SRT or WebVTT cues to utterances. Cue numbers, headers and NOTE blocks are ignored.
-
-    A leading `Name:` or `<v Name>` becomes the speaker; otherwise the speaker is "Speaker".
-    """
-    out = []
-    for block in re.split(r"\n\s*\n", text.replace("\r\n", "\n")):
-        lines = [ln for ln in block.strip().split("\n") if ln.strip()]
-        for i, line in enumerate(lines):
-            m = _CUE_TIME.search(line)
-            if not m:
-                continue
-            start, end = _t(*m.groups()[:4]), _t(*m.groups()[4:])
-            body = " ".join(lines[i + 1 :])
-            speaker = "Speaker"
-            sm = re.match(r"^<v\s+([^>]{1,40})>\s*(.*)$", body) or re.match(r"^([A-Z][\w .'-]{0,40}?):\s+(.*)$", body)
-            if sm:
-                speaker, body = sm.group(1).strip(), sm.group(2)
-            body = re.sub(r"<[^>]+>", "", body).strip()  # drop VTT styling tags like <i> or <c.red>
-            if body:
-                out.append(_Utterance(speaker, body, start, end, []))
-            break
-    return out
-
-
 # ---------------------------------------------------------------- sentence splitting
 
 
@@ -220,43 +182,15 @@ def build_transcript(webinar_id: str, utterances: list[_Utterance], duration: fl
 # ---------------------------------------------------------------- entry points
 
 
-def parse_transcript(webinar_id: str, raw: str | bytes, filename: str = "", duration: float | None = None) -> Transcript:
-    """Parse a transcript file or API response. The format is detected from the filename and content."""
+def parse_transcript(webinar_id: str, raw: str | bytes, duration: float | None = None) -> Transcript:
+    """Parse a MeetStream transcript response (or our saved IR). The shape is detected from the content."""
     text = raw.decode("utf-8-sig") if isinstance(raw, bytes) else raw
-    name = filename.lower()
-    if name.endswith((".srt", ".vtt")) or text.lstrip().startswith("WEBVTT"):
-        utterances = _utterances_from_cues(text)
-    else:
-        try:
-            data = json.loads(text)
-        except json.JSONDecodeError as e:
-            raise TranscriptError(f"Transcript is neither JSON nor SRT/VTT: {e}") from e
-        if isinstance(data, dict) and "segments" in data and data.get("webinar_id"):
-            # Our own IR (e.g. a re-imported transcript.json): keep ids as they are.
-            data["webinar_id"] = webinar_id
-            return Transcript.model_validate(data)
-        utterances = _utterances_from_json(data)
-    return build_transcript(webinar_id, utterances, duration)
-
-
-def transcribe_media(webinar_id: str, audio_path: Path, duration: float | None) -> Transcript:
-    """Local speech-to-text for uploads that arrive without a transcript.
-
-    Optional (`pip install faster-whisper`). Uses the small "base" model on CPU or GPU. It
-    has no speaker diarisation, so everything is attributed to "Speaker"; for real webinars,
-    MeetStream's own transcript (with speaker names) is much better input.
-    """
     try:
-        from faster_whisper import WhisperModel  # type: ignore
-    except ImportError as e:
-        raise TranscriptError(
-            "No transcript was provided and faster-whisper is not installed. Upload a transcript "
-            "(MeetStream JSON, SRT or VTT) with the recording, or `pip install faster-whisper`."
-        ) from e
-    model = WhisperModel("base", device="auto", compute_type="int8")
-    raw_segments, _info = model.transcribe(str(audio_path), word_timestamps=True, vad_filter=True)
-    utterances = []
-    for s in raw_segments:
-        words = [Word(text=w.word.strip(), start=w.start, end=w.end, confidence=w.probability) for w in s.words or []]
-        utterances.append(_Utterance("Speaker", s.text.strip(), s.start, s.end, words))
-    return build_transcript(webinar_id, utterances, duration)
+        data = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise TranscriptError(f"MeetStream's transcript is not valid JSON: {e}") from e
+    if isinstance(data, dict) and "segments" in data and data.get("webinar_id"):
+        # Our own IR (e.g. a saved transcript.json): keep ids as they are.
+        data["webinar_id"] = webinar_id
+        return Transcript.model_validate(data)
+    return build_transcript(webinar_id, _utterances_from_json(data), duration)

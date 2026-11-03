@@ -1,6 +1,6 @@
 # API reference
 
-Base URL: `http://127.0.0.1:8000` by default. All bodies are JSON unless noted. FastAPI also serves interactive docs at **`/docs`** (Swagger UI) and the schema at `/openapi.json`.
+Base URL: `http://127.0.0.1:8000` by default. All bodies are JSON. FastAPI also serves interactive docs at **`/docs`** (Swagger UI) and the schema at `/openapi.json`.
 
 ```bash
 B=http://127.0.0.1:8000
@@ -30,7 +30,6 @@ Errors look like `{"detail": "<message>"}`, or a list of field errors for 422.
 | 401 | Token required |
 | 404 | Job, asset, file or export not found |
 | 409 | A rule refused the action: review state, consent missing, nothing approved, job still processing, retrying a job that hasn't failed |
-| 415 | Unsupported upload file type |
 | 422 | Body failed validation (configuration, edited content) |
 | 502 | MeetStream or the model failed during a synchronous call |
 
@@ -41,10 +40,10 @@ Errors look like `{"detail": "<message>"}`, or a list of field errors for 422.
 ### `GET /api/v1/health`
 
 ```json
-{"ok": true, "llm_mode": "claude", "model": "claude-opus-5-5", "meetstream_configured": true, "auth_required": false}
+{"ok": true, "llm_mode": "openai", "model": "gpt-6-astra", "meetstream_configured": true, "auth_required": false}
 ```
 
-`llm_mode` is `"claude"` or `"offline"`. `model` is `null` offline.
+`llm_mode` is `"openai"` or `"offline"`. `model` is `null` offline.
 
 ---
 
@@ -108,32 +107,14 @@ curl -X POST $P/jobs -H 'Content-Type: application/json' -d '{
 
 - Give **either** `source.link` **or** `source.recording_id`:
   - `link` takes a bot id, any MeetStream URL containing one, or the meeting's own Zoom / Meet / Teams link. It's resolved before the job is created, and the job's `source` records `bot_id` and `resolved_from`. A link that leads nowhere returns **422** with the reason, and no job is created.
-  - `recording_id` (alias `bot_id`) is the MeetStream bot id, used as is.
+  - `recording_id` (alias `bot_id`) is the MeetStream bot id.
+  - Either way, the recording is checked with MeetStream first: an unknown id, another account's bot, or a bot still in its meeting returns **422** with the reason.
 - `title` is optional. The default is "<Platform> recording <date>".
 - `configuration` is optional. Every field is described in [CONFIGURATION.md](CONFIGURATION.md#per-job-options-jobconfig).
 
 The response is **202** with the job (see [Job object](#job-object)). Processing happens in the background.
 
-### `POST /api/v1/content-factory/uploads`: package an uploaded recording
-
-Multipart form:
-
-| Field | Required | Notes |
-|---|---|---|
-| `recording` | one of the two | `.mp4 .mov .webm .mkv .mp3 .wav .m4a` |
-| `transcript` | one of the two | MeetStream JSON, `.srt` or `.vtt`. Without it, local transcription needs faster-whisper. |
-| `title` | no | Default "Untitled webinar" |
-| `configuration` | no | JobConfig as a JSON **string** |
-
-```bash
-curl -X POST $P/uploads \
-  -F recording=@samples/sample_webinar.mp4 \
-  -F transcript=@samples/sample_transcript.json \
-  -F "title=Building AI Agents That Can Join Meetings" \
-  -F 'configuration={"clip_count": 3, "clip_formats": ["portrait"]}'
-```
-
-The response is **202** with the job. A transcript-only upload (no recording) produces every text asset, plus captions without video.
+There is no upload endpoint: MeetStream is the only source of recordings and transcripts. To try the API without a MeetStream account, run the local stand-in (`scripts/demo_meetstream.py`, see [QUICKSTART.md](QUICKSTART.md)).
 
 ### `GET /api/v1/content-factory/jobs`
 
@@ -141,8 +122,11 @@ The 50 most recent jobs:
 
 ```json
 [{"job_id": "job_f7dd0cc32a64", "status": "awaiting_review", "progress": 100,
-  "title": "Building AI Agents That Can Join Meetings", "created_at": "2026-10-22T14:54:54+00:00"}]
+  "title": "Building AI Agents That Can Join Meetings", "created_at": "2026-10-22T14:54:54+00:00",
+  "assets": 29, "approved": 5, "to_review": 22}]
 ```
+
+`assets`, `approved` and `to_review` count the job's assets, for showing review progress in a list.
 
 ### `GET /api/v1/content-factory/jobs/{job_id}`
 
@@ -163,14 +147,14 @@ Poll this until `status` is `awaiting_review` or `failed`.
     {"level": "warning", "code": "sensitive_content",
      "message": "1 segment(s) may contain confidential or personal information. …", "segment_ids": ["s0027"]}
   ],
-  "generator": "claude",
+  "generator": "openai",
   "configuration": {"audience": "developers", "tone": "technical", "clip_count": 5, "…": "…"},
-  "source": {"type": "upload", "title": "…", "filename": "sample_webinar.mp4", "…": "…"},
+  "source": {"type": "meetstream_recording", "link": "https://zoom.us/j/8812345678", "bot_id": "3f2b9c1e-…", "resolved_from": "meeting_link", "title": "…"},
   "consent_confirmed": false,
   "consent_note": null,
   "created_at": "2026-10-22T14:54:54+00:00",
   "completed_at": null,
-  "webinar": {"id": "web_899db6a91ea4", "title": "…", "source_type": "upload", "source_ref": "sample_webinar.mp4",
+  "webinar": {"id": "web_899db6a91ea4", "title": "…", "source_type": "meetstream_recording", "source_ref": "3f2b9c1e-…",
               "duration_seconds": 227.05, "has_video": 1},
   "asset_counts": {"clip": {"PENDING_REVIEW": 4}, "blog": {"PENDING_REVIEW": 1}, "…": {}},
   "exports": []
@@ -322,11 +306,14 @@ A refused transition returns **409**, e.g. `"Cannot approve an asset that is CHA
 
 ## End-to-end script
 
+Against real MeetStream, use your own meeting link. Against the local stand-in (`scripts/demo_meetstream.py`), the link below works as is.
+
 ```bash
 set -e
 B=http://127.0.0.1:8000; P=$B/api/v1/content-factory
-J=$(curl -s -X POST $P/uploads -F recording=@samples/sample_webinar.mp4 -F transcript=@samples/sample_transcript.json \
-      -F title=Sample | python3 -c 'import sys,json; print(json.load(sys.stdin)["job_id"])')
+J=$(curl -s -X POST $P/jobs -H 'Content-Type: application/json' \
+      -d '{"source": {"type": "meetstream_recording", "link": "https://zoom.us/j/8812345678", "title": "Sample"}}' \
+      | python3 -c 'import sys,json; print(json.load(sys.stdin)["job_id"])')
 until curl -s $P/jobs/$J | grep -qE '"status":"(awaiting_review|failed)"'; do sleep 2; done
 
 # Approve every clip and the blog

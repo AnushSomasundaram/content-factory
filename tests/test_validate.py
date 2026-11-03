@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import pytest
 
 from contentfactory import review, segmentation, validate
@@ -83,7 +81,7 @@ def test_sensitive_content_is_flagged(transcript):
 
 @pytest.mark.skipif(not (SAMPLES / "sample_transcript.json").exists(), reason="run scripts/make_sample.py first")
 def test_chapter_boundaries_land_on_spoken_transitions():
-    t = parse_transcript("w", (SAMPLES / "sample_transcript.json").read_bytes(), "s.json")
+    t = parse_transcript("w", (SAMPLES / "sample_transcript.json").read_bytes())
     starts = segmentation.detect_boundaries(t)
     texts = [t.segments[i].text for i in starts[1:]]
     assert len(starts) >= 3

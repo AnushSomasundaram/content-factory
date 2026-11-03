@@ -53,7 +53,7 @@ def ms_transcript_json() -> str:
 
 @pytest.fixture
 def transcript(ms_transcript_json):
-    return parse_transcript("web_test", ms_transcript_json, "t.json")
+    return parse_transcript("web_test", ms_transcript_json)
 
 
 @pytest.fixture(scope="session")

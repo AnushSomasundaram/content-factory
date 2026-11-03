@@ -6,9 +6,9 @@ configuration at all (offline mode, no MeetStream import). See docs/CONFIGURATIO
 | Variable              | Default                              | Meaning                                         |
 |-----------------------|--------------------------------------|-------------------------------------------------|
 | CF_DATA_DIR           | ./data                               | Database, recordings, renders, exports          |
-| CF_LLM                | claude if credentials found, else offline | Which generator to use                     |
-| CF_MODEL              | claude-opus-5-5                      | Claude model id                                 |
-| CF_EFFORT             | medium                               | Claude effort: low / medium / high / xhigh / max |
+| CF_LLM                | openai if OPENAI_API_KEY is set, else offline | Which generator to use                 |
+| CF_MODEL              | gpt-6-astra                          | OpenAI model id                                 |
+| CF_EFFORT             | medium                               | Reasoning effort: low / medium / high / xhigh / max |
 | CF_JOB_WORKERS        | 2                                    | Jobs processed at the same time                 |
 | MEETSTREAM_API_KEY    | (unset)                              | Enables MeetStream recording import             |
 | MEETSTREAM_BASE_URL   | https://api.meetstream.ai/api/v1     | Override for testing                            |
@@ -20,22 +20,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
-def _has_anthropic_credentials() -> bool:
-    """Whether the Anthropic SDK will find credentials, mirroring its own lookup order."""
-    if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"):
-        return True
-    # `ant auth login` stores a profile the SDK picks up without env vars.
-    return (Path.home() / ".config" / "anthropic").exists()
-
-
 @dataclass(frozen=True)
 class Settings:
     data_dir: Path = field(default_factory=lambda: Path(os.environ.get("CF_DATA_DIR", "data")).resolve())
-    # "claude" uses the Anthropic API; "offline" uses deterministic heuristics (tests, demos without a key).
+    # "openai" uses the OpenAI API; "offline" uses deterministic heuristics (tests, demos without a key).
     llm_mode: str = field(
-        default_factory=lambda: os.environ.get("CF_LLM", "claude" if _has_anthropic_credentials() else "offline")
+        default_factory=lambda: os.environ.get("CF_LLM", "openai" if os.environ.get("OPENAI_API_KEY") else "offline")
     )
-    model: str = field(default_factory=lambda: os.environ.get("CF_MODEL", "claude-opus-5-5"))
+    model: str = field(default_factory=lambda: os.environ.get("CF_MODEL", "gpt-6-astra"))
     effort: str = field(default_factory=lambda: os.environ.get("CF_EFFORT", "medium"))
     meetstream_api_key: str | None = field(default_factory=lambda: os.environ.get("MEETSTREAM_API_KEY"))
     meetstream_base_url: str = field(
@@ -45,7 +37,6 @@ class Settings:
 
     # On-disk layout under data_dir:
     #   contentfactory.db             SQLite: webinars, jobs, assets, versions, reviews, exports
-    #   uploads/<id>/                 files exactly as uploaded
     #   webinars/<webinar_id>/        recording.*, transcript.json, raw MeetStream responses
     #   jobs/<job_id>/clips|captions  rendered media for one job
     #   jobs/<job_id>/exports/        ZIP packages

@@ -32,12 +32,10 @@ The weights only drive the progress bar.
 
 The raw responses are saved next to the recording, for debugging. Details are in [MEETSTREAM.md](MEETSTREAM.md).
 
-**Upload source** (`_ingest_upload`): the API has already saved the files; they're copied into the webinar folder.
+MeetStream is the **only source** of recordings and transcripts: there is no upload path and no local speech-to-text. The download then goes through `_finish_webinar`:
 
-**Both paths** then run `_finish_webinar`:
-
-1. `ffprobe` the recording. If it has **no audio track**, the job fails: *"nothing to transcribe or clip"*.
-2. Parse the transcript (`ingest.parse_transcript`). If there's no transcript, transcribe locally with faster-whisper (optional dependency).
+1. `ffprobe` the recording. If it has **no audio track**, the job fails: *"nothing to clip"*.
+2. Parse MeetStream's transcript (`ingest.parse_transcript`).
 3. Save `transcript.json` and record `has_video` and `duration_seconds`.
 
 Then two job-level checks run on the transcript:
@@ -49,7 +47,7 @@ If there's no video, a `no_video` warning explains that clips will be audio exce
 
 ### Transcript parsing
 
-`ingest.py` accepts:
+`ingest.py` accepts the shapes MeetStream's transcript endpoint returns (which one depends on the bot's transcription provider):
 
 | Format | Detected by | Notes |
 |---|---|---|
@@ -57,7 +55,6 @@ If there's no video, a `no_video` warning explains that clips will be audio exce
 | MeetStream participant-keyed | JSON list with `participant.name` and `words[].start_timestamp.relative` | No utterance-level times; derived from the words |
 | Wrapped JSON | object with `segments` / `transcript` / `utterances` / `results` list | |
 | This app's own IR | object with `webinar_id` and `segments` | Segment ids are kept as they are |
-| SRT / WebVTT | `.srt`/`.vtt` extension or a `WEBVTT` header | `Name: text` and `<v Name>` set the speaker |
 
 **Sentence splitting** is what makes citations precise:
 
@@ -212,8 +209,8 @@ For each clip asset (`render_clip_files`):
 | Failure | Behaviour |
 |---|---|
 | MeetStream still processing (202) | Waits and retries up to ~2 minutes, then fails with "still processing"; retry later |
-| No audio track | Fails: "nothing to transcribe or clip" |
-| No transcript, faster-whisper not installed | Fails, explaining both fixes |
+| No audio track | Fails: "nothing to clip" |
+| No transcript on the bot | Fails with MeetStream's reason (transcription not enabled, or the bot was never admitted) |
 | No video | Continues: text assets, plus audio excerpts with captions |
 | Model refusal / bad credentials / rate limit | Stage fails with that reason; retry resumes there |
 | One clip fails to render | Clip keeps a `render_failed` error; job continues |

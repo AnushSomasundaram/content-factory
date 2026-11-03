@@ -1,9 +1,9 @@
 """Job orchestration: ingest -> understand -> generate -> render -> validate -> review queue.
 
-A *job* turns one source (a MeetStream bot or an upload) into a set of *assets* waiting
+A *job* turns one MeetStream recording (a bot's video or audio plus its transcript) into a set of *assets* waiting
 for review. It runs in a background thread pool, stage by stage:
 
-    ingest            fetch/copy the recording, parse the transcript into the IR (ir.py)
+    ingest            fetch the recording and transcript from MeetStream, parse the transcript into the IR (ir.py)
     chapters          boundaries from segmentation.py, names from the generator
     content_brief     the shared story every later asset follows
     clip_selection    generator proposes moments; validate.py snaps, scores and filters them
@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import json
 import logging
-import shutil
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -38,7 +37,7 @@ from .config import Settings
 from .db import Store, now
 from .drafts import BlogDraft, ContentBrief, JobConfig, SocialPost, VisualBrief
 from .generators import Chapter, GenContext, Generator, GenerationError, make_generator
-from .ingest import TranscriptError, parse_transcript, transcribe_media
+from .ingest import TranscriptError, parse_transcript
 from .ir import Transcript, fmt_clock, fmt_hms
 from .meetstream import MeetStreamClient, MeetStreamError, with_retry_when_processing
 from .segmentation import chapter_spans, detect_boundaries
@@ -69,7 +68,7 @@ STAGE_ASSET_TYPES = {
     "visual_briefs": ["visual_brief"],
 }
 # Independent of each other (they all read only the transcript, chapters and brief), so they
-# run concurrently. With Claude, that turns three long calls into one wait.
+# run concurrently. With OpenAI, that turns three long calls into one wait.
 PARALLEL_GROUP = ("blog", "social", "quotes")
 
 # Which draft model an asset's content is, for edits and regeneration.
@@ -122,7 +121,7 @@ class ContentFactory:
 
     @property
     def generator(self) -> Generator:
-        # Created lazily so constructing the app never needs Anthropic credentials.
+        # Created lazily so constructing the app never needs OpenAI credentials.
         if self._generator is None:
             self._generator = self._generator_factory()
         return self._generator
@@ -235,12 +234,9 @@ class ContentFactory:
         """Create the webinar record (recording + transcript on disk) and attach it to the job."""
         job = self.store.get_job(job_id)
         source = job["source"]
-        if source["type"] == "meetstream_recording":
-            webinar = self._ingest_meetstream(source)
-        elif source["type"] == "upload":
-            webinar = self._ingest_upload(source)
-        else:
-            raise PipelineError(f"Unsupported source type {source['type']!r}")
+        if source["type"] != "meetstream_recording":
+            raise PipelineError(f"Unsupported source type {source['type']!r}; recordings come from MeetStream.")
+        webinar = self._ingest_meetstream(source)
         self.store.update_job(job_id, webinar_id=webinar["id"])
         transcript = self._read_transcript(webinar)
         self._warn(job_id, *validate.recording_warnings(transcript))
@@ -248,51 +244,20 @@ class ContentFactory:
             self._warn(job_id, validate.note("warning", "no_video",
                        "The recording has no video track, so clips are delivered as audio excerpts with captions."))
 
-    def _finish_webinar(self, webinar: dict, recording: Path | None, transcript_raw: bytes | str | None,
-                        transcript_name: str) -> dict:
-        """Shared tail of both ingest paths: check the media, build the IR, save it, update the webinar.
-
-        Prefers a supplied transcript; falls back to local speech-to-text only when there is none.
-        """
+    def _finish_webinar(self, webinar: dict, recording: Path, transcript_raw: str) -> dict:
+        """Check the downloaded media, build the IR from MeetStream's transcript, save both on the webinar."""
         wdir = self.settings.webinar_dir(webinar["id"])
-        info = None
-        if recording is not None:
-            media.require_ffmpeg()
-            info = media.probe(recording)
-            if not info.has_audio:
-                raise PipelineError("The recording has no audio track, so there is nothing to transcribe or clip.")
-        duration = info.duration if info else None
-        if transcript_raw is not None:
-            transcript = parse_transcript(webinar["id"], transcript_raw, transcript_name, duration)
-        elif recording is not None:
-            audio = media.extract_audio(recording, wdir / "audio_16k.wav")
-            transcript = transcribe_media(webinar["id"], audio, duration)
-        else:
-            raise PipelineError("Neither a transcript nor a recording is available.")
+        media.require_ffmpeg()
+        info = media.probe(recording)
+        if not info.has_audio:
+            raise PipelineError("The recording has no audio track, so there is nothing to clip.")
+        transcript = parse_transcript(webinar["id"], transcript_raw, info.duration)
         tpath = wdir / "transcript.json"
         tpath.write_text(transcript.model_dump_json(indent=1))
         self.store.update_webinar(
-            webinar["id"], recording_path=str(recording) if recording else None,
-            has_video=int(bool(info and info.has_video)), duration_seconds=transcript.duration,
-            transcript_path=str(tpath))
+            webinar["id"], recording_path=str(recording), has_video=int(info.has_video),
+            duration_seconds=transcript.duration, transcript_path=str(tpath))
         return self.store.get_webinar(webinar["id"])
-
-    def _ingest_upload(self, source: dict) -> dict:
-        """Upload path: the API already saved the files under uploads/; copy them into the webinar folder."""
-        webinar = self.store.create_webinar(title=source.get("title") or "Untitled webinar", source_type="upload",
-                                            source_ref=source.get("filename"))
-        wdir = self.settings.webinar_dir(webinar["id"])
-        wdir.mkdir(parents=True, exist_ok=True)
-        recording = None
-        if source.get("recording_path"):
-            src = Path(source["recording_path"])
-            recording = wdir / f"recording{src.suffix.lower()}"
-            shutil.copyfile(src, recording)
-        raw, name = None, ""
-        if source.get("transcript_path"):
-            tp = Path(source["transcript_path"])
-            raw, name = tp.read_bytes(), tp.name
-        return self._finish_webinar(webinar, recording, raw, name)
 
     def _ingest_meetstream(self, source: dict) -> dict:
         """MeetStream path: bot detail -> transcript -> video (or audio) -> IR.
@@ -329,7 +294,7 @@ class ContentFactory:
                 if not audio.get("audio_url"):
                     raise PipelineError("MeetStream returned neither a video nor an audio recording for this bot.")
                 recording = client.download(audio["audio_url"], wdir / "recording.wav")
-            return self._finish_webinar(webinar, recording, json.dumps(transcript), "meetstream.json")
+            return self._finish_webinar(webinar, recording, json.dumps(transcript))
         finally:
             client.close()
 

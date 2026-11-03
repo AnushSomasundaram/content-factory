@@ -6,12 +6,12 @@ Read once at startup (`contentfactory/config.py`). Every one is optional.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | (unset) | Enables Claude. `ANTHROPIC_AUTH_TOKEN`, or an `ant auth login` profile in `~/.config/anthropic`, also count. |
-| `CF_LLM` | `claude` if credentials are found, else `offline` | Force a generator: `claude` or `offline` |
-| `CF_MODEL` | `claude-opus-5-5` | Claude model id |
-| `CF_EFFORT` | `medium` | `low` / `medium` / `high` / `xhigh` / `max`: how hard Claude thinks. Higher is better and slower. |
-| `MEETSTREAM_API_KEY` | (unset) | Enables MeetStream import (`ms_…`, from app.meetstream.ai/api-key) |
-| `MEETSTREAM_BASE_URL` | `https://api.meetstream.ai/api/v1` | Point at a mock or staging server |
+| `OPENAI_API_KEY` | (unset) | Enables generation with OpenAI. `OPENAI_BASE_URL`, `OPENAI_ORG_ID` and `OPENAI_PROJECT_ID` are read by the SDK too. |
+| `CF_LLM` | `openai` if `OPENAI_API_KEY` is set, else `offline` | Force a generator: `openai` or `offline` |
+| `CF_MODEL` | `gpt-6-astra` | OpenAI model id, e.g. `gpt-6.1-sol` for lower cost |
+| `CF_EFFORT` | `medium` | Reasoning effort: `low` / `medium` / `high` / `xhigh` / `max`. Higher is better and slower. |
+| `MEETSTREAM_API_KEY` | (unset) | Required to process anything: MeetStream is the only source of recordings and transcripts (`ms_…`, from app.meetstream.ai/api-key) |
+| `MEETSTREAM_BASE_URL` | `https://api.meetstream.ai/api/v1` | Point at a mock or staging server, e.g. `scripts/demo_meetstream.py` |
 | `CF_DATA_DIR` | `./data` | Database, recordings, renders and exports |
 | `CF_JOB_WORKERS` | `2` | Jobs processed at the same time. Each uses CPU for FFmpeg and makes up to 3 concurrent model calls. |
 | `CF_API_TOKEN` | (unset) | If set, the API requires `Authorization: Bearer <token>` (or `?access_token=`) |
@@ -27,7 +27,7 @@ set -a; source .env; set +a
 
 ## Per-job options (`JobConfig`)
 
-Sent as `configuration` when creating a job (JSON body, or a JSON string in the upload form). Stored on the job, so retries use the same settings.
+Sent as `configuration` when creating a job. Stored on the job, so retries use the same settings.
 
 | Field | Type / range | Default | Effect |
 |---|---|---|---|

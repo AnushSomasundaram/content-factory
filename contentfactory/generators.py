@@ -1,6 +1,6 @@
 """Content generators. Both implement the `Generator` protocol and return the draft models in drafts.py.
 
-ClaudeGenerator   the real thing: Claude via the Anthropic SDK, with structured outputs.
+OpenAIGenerator   the real thing: an OpenAI model via the Responses API, with structured outputs.
 OfflineGenerator  deterministic heuristics, for tests and for demos without an API key.
                   It picks and arranges the speakers' own sentences; it doesn't write.
 
@@ -12,17 +12,17 @@ What a generator is (and isn't) responsible for:
     citations and scores are all re-checked in validate.py, and anything that fails is
     dropped or flagged, whichever generator produced it.
 
-How the Claude calls are built:
-  * System prompt = fixed instructions + the full transcript. The transcript block carries
-    `cache_control`, so all seven-plus calls in a job read it from the prompt cache instead
-    of paying for it again (and later calls start faster).
-  * Each stage's specific instructions, chapter table and content brief go in the user
-    message, after the cached prefix.
-  * Output shape is enforced with structured outputs (`output_format=<Pydantic model>`), so
+How the OpenAI calls are built:
+  * `instructions` = fixed instructions + the full transcript. That prefix is identical for
+    every call in a job, so OpenAI's automatic prompt caching serves it from cache after the
+    first call (cheaper, and later calls start faster). `prompt_cache_key` is the webinar id,
+    which keeps a job's calls routed to the same cache.
+  * Each stage's specific instructions, chapter table and content brief go in `input`,
+    after the cached prefix.
+  * Output shape is enforced with structured outputs (`text_format=<Pydantic model>`), so
     there is no JSON parsing or retry-on-bad-JSON code.
-  * Adaptive thinking with a configurable effort (default "medium"; see CF_EFFORT).
-  * Server-side refusal fallback (`fallbacks: "default"`) is on, so a safety classifier
-    false positive is retried on a fallback model instead of failing the stage.
+  * Reasoning effort is configurable (default "medium"; see CF_EFFORT).
+  * `store=False`: webinar transcripts aren't kept on OpenAI's side after the call.
 """
 
 from __future__ import annotations
@@ -104,7 +104,7 @@ AUDIENCE = {
 }
 
 
-# ===================================================================== Claude
+# ===================================================================== OpenAI
 
 
 # Shared by every call. Explains the citation contract and the no-invention rule once, with the
@@ -126,77 +126,75 @@ imitate the speech patterns, and don't refer to "the transcript" in the assets t
 strong items than reject eight weak ones."""
 
 
-class ClaudeGenerator:
-    name = "claude"
+class OpenAIGenerator:
+    name = "openai"
 
-    def __init__(self, model: str = "claude-opus-5-5", effort: str = "medium", client=None):
-        import anthropic
+    def __init__(self, model: str = "gpt-6-astra", effort: str = "medium", client=None):
+        import openai
 
-        self._anthropic = anthropic
-        self.client = client or anthropic.Anthropic(max_retries=3)
+        self._openai = openai
+        self.client = client or openai.OpenAI(max_retries=3)
         self.model = model
         self.effort = effort
 
     # ---------------------------------------------------------------- plumbing
 
-    def _system(self, ctx: GenContext) -> list[dict]:
-        """System blocks: instructions, then the transcript (cached). Identical for every stage of a job."""
+    def _instructions(self, ctx: GenContext) -> str:
+        """Instructions, then the transcript. Identical for every stage of a job, so it is cached."""
         speakers = ", ".join(ctx.transcript.speakers)
-        transcript = (
-            f"Webinar: {ctx.title}\nDuration: {fmt_clock(ctx.transcript.duration)}\nSpeakers: {speakers}\n\n"
-            f"<transcript>\n{ctx.transcript.render_for_llm()}\n</transcript>"
+        return (
+            f"{SYSTEM_PROMPT}\n\nWebinar: {ctx.title}\nDuration: {fmt_clock(ctx.transcript.duration)}\n"
+            f"Speakers: {speakers}\n\n<transcript>\n{ctx.transcript.render_for_llm()}\n</transcript>"
         )
-        # The transcript block is identical across every stage of a job, so it is cached once and re-read.
-        return [
-            {"type": "text", "text": SYSTEM_PROMPT},
-            {"type": "text", "text": transcript, "cache_control": {"type": "ephemeral"}},
-        ]
 
     def _call(self, ctx: GenContext, schema: type[T], task: str, max_tokens: int = 16000) -> T:
         """One structured-output request. Returns a validated `schema` instance or raises GenerationError.
 
         Transient failures (429, 5xx, connection errors) are retried by the SDK itself
         (`max_retries=3` on the client); anything reaching the except blocks is final.
+        `max_tokens` covers reasoning as well as the visible output.
         """
-        a = self._anthropic
+        o = self._openai
         try:
-            # Raw response first: on a refusal or truncation the body isn't valid JSON for the schema,
-            # and parse() would raise a validation error that hides the real stop reason.
-            raw = self.client.beta.messages.with_raw_response.parse(
+            # Raw response first: on a refusal or truncation the text isn't valid JSON for the schema,
+            # and parsing would raise a validation error that hides the real reason.
+            raw = self.client.responses.with_raw_response.parse(
                 model=self.model,
-                max_tokens=max_tokens,
-                betas=["server-side-fallback-2026-07-01"],
-                fallbacks="default",
-                thinking={"type": "adaptive"},
-                output_config={"effort": self.effort},
-                system=self._system(ctx),
-                messages=[{"role": "user", "content": task}],
-                output_format=schema,
+                instructions=self._instructions(ctx),
+                input=task,
+                text_format=schema,
+                reasoning={"effort": self.effort},
+                max_output_tokens=max_tokens,
+                prompt_cache_key=f"contentfactory-{ctx.transcript.webinar_id}",
+                store=False,
             )
-        except a.BadRequestError as e:
-            raise GenerationError(f"Claude rejected the request: {e.message}") from e
-        except (a.AuthenticationError, a.PermissionDeniedError) as e:
-            raise GenerationError("Anthropic credentials are missing or invalid (set ANTHROPIC_API_KEY).") from e
-        except a.RateLimitError as e:
-            raise GenerationError("Rate limited by the Anthropic API after retries; retry the job later.") from e
-        except a.APIStatusError as e:
-            raise GenerationError(f"Anthropic API error {e.status_code}: {e.message}") from e
-        except a.APIConnectionError as e:
-            raise GenerationError("Could not reach the Anthropic API.") from e
+        except o.BadRequestError as e:
+            raise GenerationError(f"OpenAI rejected the request: {e.message}") from e
+        except (o.AuthenticationError, o.PermissionDeniedError) as e:
+            raise GenerationError("OpenAI credentials are missing or invalid (set OPENAI_API_KEY).") from e
+        except o.RateLimitError as e:
+            raise GenerationError("Rate limited by the OpenAI API after retries; retry the job later.") from e
+        except o.APIStatusError as e:
+            raise GenerationError(f"OpenAI API error {e.status_code}: {e.message}") from e
+        except o.APIConnectionError as e:
+            raise GenerationError("Could not reach the OpenAI API.") from e
 
-        body = raw.json()
-        stop_reason = body.get("stop_reason")
-        if stop_reason == "refusal":
-            category = (body.get("stop_details") or {}).get("category")
-            raise GenerationError(f"Claude declined this step (category: {category or 'unspecified'}).")
-        if stop_reason == "max_tokens":
-            raise GenerationError(f"Output for {schema.__name__} hit max_tokens before finishing.")
+        body = raw.http_response.json()
+        if body.get("status") == "incomplete":
+            reason = (body.get("incomplete_details") or {}).get("reason")
+            if reason == "max_output_tokens":
+                raise GenerationError(f"Output for {schema.__name__} hit max_output_tokens before finishing.")
+            raise GenerationError(f"OpenAI stopped {schema.__name__} early (reason: {reason or 'unspecified'}).")
+        for item in body.get("output") or []:
+            for part in item.get("content") or [] if item.get("type") == "message" else []:
+                if part.get("type") == "refusal":
+                    raise GenerationError(f"The model declined this step: {part.get('refusal') or 'no reason given'}")
         try:
-            parsed = raw.parse().parsed_output
+            parsed = raw.parse().output_parsed
         except ValueError as e:  # pydantic.ValidationError subclasses ValueError
-            raise GenerationError(f"Claude's {schema.__name__} didn't match the schema: {e}") from e
+            raise GenerationError(f"The model's {schema.__name__} didn't match the schema: {e}") from e
         if parsed is None:
-            raise GenerationError(f"Claude returned no parseable {schema.__name__}.")
+            raise GenerationError(f"The model returned no parseable {schema.__name__}.")
         return parsed
 
     def _audience(self, ctx: GenContext) -> str:
@@ -533,7 +531,7 @@ class OfflineGenerator:
 
 
 def make_generator(mode: str, model: str, effort: str) -> Generator:
-    """Generator for the configured mode ("claude" or "offline")."""
+    """Generator for the configured mode ("openai" or "offline")."""
     if mode == "offline":
         return OfflineGenerator()
-    return ClaudeGenerator(model=model, effort=effort)
+    return OpenAIGenerator(model=model, effort=effort)

@@ -18,6 +18,7 @@ from contentfactory.pipeline import ContentFactory
 from .conftest import make_meetstream_transcript
 
 P = "/api/v1/content-factory"
+OTHER_BOT = "0c0f8353-ad37-43af-ac53-322f23d44743"
 CONFIG = {"clip_count": 3, "min_clip_seconds": 5, "max_clip_seconds": 20, "clip_formats": ["landscape", "portrait"]}
 
 
@@ -29,8 +30,9 @@ def fake_meetstream(video_bytes: bytes, calls: list):
             assert "authorization" not in request.headers  # presigned URLs carry their own auth
             return httpx.Response(200, content=video_bytes)
         assert request.headers["authorization"] == "Token ms_key"
-        if path == "/api/v1/bots/bot_42/detail":
-            return httpx.Response(200, json={"bot_details": {"BotID": "bot_42", "Platform": "Zoom", "CreatedAt": "2026-10-21T15:00:00Z"}})
+        if path in ("/api/v1/bots/bot_42/detail", f"/api/v1/bots/{OTHER_BOT}/detail"):
+            bot_id = path.split("/")[-2]
+            return httpx.Response(200, json={"bot_details": {"BotID": bot_id, "Platform": "Zoom", "CreatedAt": "2026-10-21T15:00:00Z"}})
         if path == "/api/v1/bots/bot_42/get_transcript":
             return httpx.Response(200, json=make_meetstream_transcript())
         if path == "/api/v1/bots/bot_42/get_video":
@@ -151,17 +153,16 @@ def test_job_from_a_meeting_link_uses_that_meetings_recording(env):
 
     # Links that lead nowhere are refused up front with a reason (no job is created).
     for bad, why in (("https://meet.google.com/zzz-zzzz-zzz", "No MeetStream bot has joined"),
-                     ("https://www.youtube.com/watch?v=x", "Not a MeetStream link")):
+                     ("https://www.youtube.com/watch?v=x", "Not a MeetStream link"),
+                     ("12f3c103-d29d-430e-b14e-d4b4f4b7ea14", "no recording with the id")):
         r = client.post(f"{P}/jobs", json={"source": {"type": "meetstream_recording", "link": bad}})
         assert r.status_code == 422 and why in r.json()["detail"]
     assert client.post(f"{P}/jobs", json={"source": {"type": "meetstream_recording"}}).status_code == 422
 
 
-def test_review_rules_are_enforced_by_the_backend(env, tiny_video, ms_transcript_json):
+def test_review_rules_are_enforced_by_the_backend(env):
     client, _ = env
-    r = client.post(f"{P}/uploads", data={"title": "Upload test", "configuration": json.dumps(CONFIG)},
-                    files={"recording": ("talk.mp4", tiny_video.read_bytes(), "video/mp4"),
-                           "transcript": ("talk.json", ms_transcript_json, "application/json")})
+    r = client.post(f"{P}/jobs", json={"source": {"type": "meetstream_recording", "recording_id": "bot_42"}, "configuration": CONFIG})
     assert r.status_code == 202
     job = wait(client, r.json()["job_id"])
     assert job["status"] == "awaiting_review", job["error_message"]
@@ -202,16 +203,21 @@ def test_review_rules_are_enforced_by_the_backend(env, tiny_video, ms_transcript
     assert client.post(f"{P}/assets/{t['id']}/reopen", json={}).json()["status"] == "PENDING_REVIEW"
 
 
-def test_upload_without_audio_or_transcript_fails_clearly(env, tmp_path):
-    client, _ = env
+def test_meetstream_recording_without_audio_fails_clearly(tmp_path):
     import subprocess
     silent = tmp_path / "silent.mp4"
     subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=10:duration=3",
                     "-pix_fmt", "yuv420p", str(silent)], check=True)
-    r = client.post(f"{P}/uploads", data={"title": "Silent"}, files={"recording": ("s.mp4", silent.read_bytes(), "video/mp4")})
-    job = wait(client, r.json()["job_id"])
-    assert job["status"] == "failed" and "no audio" in job["error_message"]
-    assert client.post(f"{P}/uploads", data={"title": "x"}, files={"recording": ("x.exe", b"MZ", "application/octet-stream")}).status_code == 415
+    settings = Settings(data_dir=tmp_path / "data", llm_mode="offline", meetstream_api_key="ms_key", job_workers=1)
+    transport = fake_meetstream(silent.read_bytes(), [])
+    factory = ContentFactory(settings, Store(settings.db_path),
+                             meetstream_factory=lambda: MeetStreamClient("ms_key", transport=transport))
+    with TestClient(create_app(settings, factory)) as client:
+        r = client.post(f"{P}/jobs", json={"source": {"type": "meetstream_recording", "recording_id": "bot_42"}})
+        job = wait(client, r.json()["job_id"])
+        assert job["status"] == "failed" and "no audio" in job["error_message"]
+        # Uploads are gone: MeetStream is the only source of recordings and transcripts.
+        assert client.post(f"{P}/uploads").status_code in (404, 405)
 
 
 def test_api_token_is_required_when_configured(tmp_path, monkeypatch):

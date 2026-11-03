@@ -3,7 +3,7 @@
 The whole product rests on one idea: **timestamps are data, not prose**.
 
 A transcript is stored as a list of sentence-sized `Segment`s with stable ids
-(`s0001`, `s0002`, ...). Generators (Claude or the offline heuristics) never write
+(`s0001`, `s0002`, ...). Generators (OpenAI or the offline heuristics) never write
 timestamps. Wherever they need to say "this came from the recording", they cite segment
 ids, and code in this module turns those ids into times. So:
 
@@ -111,7 +111,7 @@ class Transcript(BaseModel):
         return list(seen)
 
     def render_for_llm(self) -> str:
-        """The transcript as Claude sees it: one line per segment, `[s0042 13:54-14:02] Speaker: text`.
+        """The transcript as the model sees it: one line per segment, `[s0042 13:54-14:02] Speaker: text`.
 
         The id at the start of each line is what the model cites. Times are included so the
         model can judge clip lengths, but it never returns them.

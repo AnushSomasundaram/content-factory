@@ -1,7 +1,7 @@
 """Structured outputs the generators return, plus the per-job configuration.
 
 These Pydantic models do double duty:
-  * They are the JSON schemas Claude must answer in (structured outputs). Field
+  * They are the JSON schemas the model must answer in (structured outputs). Field
     `description`s are part of the prompt: the model reads them, so they say what a good
     value looks like.
   * They are the stored `content` of most asset types, and the schema edits are validated

@@ -49,12 +49,12 @@ Every decision is logged in `asset_reviews`: reviewer, decision, feedback, from/
 | `blog` | any `BlogDraft` field | Validated against the schema; paragraph citations are re-checked. |
 | `linkedin_post` | `text`, `hashtags`, `angle`, `segment_ids` | Validated; citations re-checked |
 | `visual_brief` | any `VisualBrief` field | A quote card's quote is re-verified |
-| `content_brief` | any `ContentBrief` field | Takeaway citations re-checked. Existing assets are **not** regenerated automatically, but any later "New variation" request uses the edited brief. |
+| `content_brief` | any `ContentBrief` field | Takeaway citations re-checked. Existing assets are **not** regenerated automatically, but any later "Rewrite with AI" request uses the edited brief. |
 | `chapters` | the `chapters` list (titles, summaries) | Boundaries must reference real segments; the YouTube text is rebuilt |
 
 Schema errors return 422 with field details.
 
-## "New variation" (regenerate)
+## "Rewrite with AI" (regenerate)
 
 `POST /assets/{id}/regenerate` with `{"feedback": "shorter, and lead with the failure story"}` sends the current draft and the feedback back to the generator. Only that asset changes. The previous version stays in the history.
 

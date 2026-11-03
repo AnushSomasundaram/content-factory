@@ -14,7 +14,7 @@
                  └─┬──────┬──────┬──────┬──────┬┘
                    │      │      │      │      │
       meetstream.py│ ingest.py   │ generators.py      media.py + captions.py
-      (REST)       │ (→ IR)      │ (Claude / offline)  (FFmpeg)
+      (REST)       │ (→ IR)      │ (OpenAI / offline)  (FFmpeg)
                    │      segmentation.py   validate.py (QA)
                    │             │
                  ┌─▼─────────────▼──────────────┐
@@ -60,7 +60,7 @@ As a result:
 
 ## Request flow: creating a package
 
-1. `POST /jobs` (MeetStream) or `POST /uploads` creates a **job** row, status `queued`, and returns 202 at once.
+1. `POST /jobs` (a MeetStream recording) creates a **job** row, status `queued`, and returns 202 at once.
 2. A worker thread runs `ContentFactory.run_job`:
    - `ingest` creates a **webinar** row: the recording plus `transcript.json` on disk.
    - `chapters` → `content_brief` → `clip_selection` run in order.
@@ -82,7 +82,7 @@ webinars 1──* content_jobs 1──* content_assets 1──* asset_versions
 
 | Table | Holds | Key columns |
 |---|---|---|
-| `webinars` | One recording + transcript | `source_type` (`meetstream_recording`/`upload`), `source_ref` (bot id or filename), `recording_path`, `has_video`, `duration_seconds`, `transcript_path` |
+| `webinars` | One recording + transcript | `source_type` (`meetstream_recording`), `source_ref` (bot id), `recording_path`, `has_video`, `duration_seconds`, `transcript_path` |
 | `content_jobs` | One run of the pipeline | `status` (`queued`/`processing`/`awaiting_review`/`failed`), `configuration` (JobConfig), `source`, `progress`, `current_stage`, `completed[]`, `warnings[]`, `error_message`, `generator`, `consent_confirmed`, `consent_note` |
 | `content_assets` | The current version of each asset | `asset_type`, `position`, `title`, `content` (JSON), `files` (kind → relative path), `source_references[]`, `qa[]`, `status`, `version` |
 | `asset_versions` | Every version, including the current one | `version`, `content`, `files`, `source_references`, `author` (generator name or editor) |
@@ -111,12 +111,10 @@ Each type is a separate asset, rather than one big package document, so each ite
 ```
 $CF_DATA_DIR (default ./data)
   contentfactory.db
-  uploads/up_<id>/recording.mp4, transcript.json     as received
   webinars/web_<id>/
       recording.mp4 | recording.wav                  source media
       transcript.json                                the IR
-      meetstream_bot.json, meetstream_transcript.json   raw MeetStream responses (MeetStream source only)
-      audio_16k.wav                                  only if we transcribed locally
+      meetstream_bot.json, meetstream_transcript.json   raw MeetStream responses
   jobs/job_<id>/
       clips/clip_01_landscape.mp4, clip_01_portrait.mp4, …
       captions/clip_01.srt, clip_01.vtt, …
@@ -137,12 +135,14 @@ The database stores paths, not bytes. Media is served by `FileResponse`, which s
 | Decision | Alternative considered | Why this way |
 |---|---|---|
 | A fixed workflow with model calls at specific stages | A swarm of autonomous agents | Easier to test, debug and resume; costs are predictable |
-| REST for MeetStream ingestion | Claude + MeetStream MCP tools | Downloads and timestamps must be exact; no model tokens spent moving bytes |
+| REST for MeetStream ingestion | An LLM driving MeetStream's MCP tools | Downloads and timestamps must be exact; no model tokens spent moving bytes |
+| MeetStream as the only source of recordings and transcripts | File uploads, local speech-to-text | One ingestion path to test and support; MeetStream's transcripts carry speaker names and word timings |
 | SQLite + local files + thread pool | PostgreSQL + S3 + Celery/Temporal | MVP scope. `Store` and the stage functions are the seams for swapping these. |
 | One asset per item | One asset per type | Per-item approval, as the spec asks |
 | Chapter boundaries from text statistics | Ask the model for chapters | Reproducible; always on a sentence; cheaper |
 | Keep the whole frame, centred on a blur, for portrait | Centre crop | Webinars are slides and screen shares, which a crop would cut off |
 | Offline generator | Require an API key | Lets tests and demos run the full workflow |
+| A local MeetStream stand-in for demos (`scripts/demo_meetstream.py`) | Keep an upload path for demos | The demo exercises the same code path as production |
 
 ## Scaling path
 

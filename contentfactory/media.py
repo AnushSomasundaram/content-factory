@@ -78,12 +78,6 @@ def probe(path: Path) -> MediaInfo:
     )
 
 
-def extract_audio(src: Path, dest: Path) -> Path:
-    """16 kHz mono WAV, the input speech-to-text expects."""
-    _run(["ffmpeg", "-y", "-v", "error", "-i", str(src), "-vn", "-ac", "1", "-ar", "16000", str(dest)])
-    return dest
-
-
 def _video_filter(fmt: str, src_w: int, src_h: int) -> str:
     """FFmpeg filter graph that reframes the input to `fmt`; its output pad is labelled [v]."""
     w, h = FORMATS[fmt]
