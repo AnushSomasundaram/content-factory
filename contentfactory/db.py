@@ -29,7 +29,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS webinars (
     id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
-    source_type TEXT NOT NULL,          -- meetstream_recording
+    source_type TEXT NOT NULL,          -- meetstream_recording | recording_url | upload
     source_ref TEXT,                    -- MeetStream bot id, or original filename
     recording_path TEXT,
     has_video INTEGER NOT NULL DEFAULT 0,

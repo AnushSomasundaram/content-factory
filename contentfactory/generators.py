@@ -129,11 +129,12 @@ strong items than reject eight weak ones."""
 class OpenAIGenerator:
     name = "openai"
 
-    def __init__(self, model: str = "gpt-6-astra", effort: str = "medium", client=None):
+    def __init__(self, model: str = "gpt-6-astra", effort: str = "medium", client=None, api_key: str | None = None):
         import openai
 
         self._openai = openai
-        self.client = client or openai.OpenAI(max_retries=3)
+        # api_key None: the SDK reads OPENAI_API_KEY itself.
+        self.client = client or openai.OpenAI(api_key=api_key, max_retries=3)
         self.model = model
         self.effort = effort
 
@@ -317,6 +318,23 @@ class OpenAIGenerator:
 # Output quality is "a reviewer can exercise the buttons", not "ready to publish".
 
 
+UNKNOWN_SPEAKER = "Speaker"  # what local transcription calls everyone (it has no speaker names)
+# Default titles ("Meeting recording", "Zoom recording 2026-10-21") that would read oddly inside a sentence.
+_GENERIC_TITLE = re.compile(r"^(meeting|zoom|gmeet|google meet|teams|untitled)?\s*recording\b", re.I)
+
+
+def _titled(ctx: GenContext) -> str:
+    """", <title>" to name the webinar in a sentence, or "" when the title is only a placeholder."""
+    return "" if _GENERIC_TITLE.match(ctx.title.strip()) else f", {ctx.title}"
+
+
+def _shorten(text: str, limit: int) -> str:
+    """`text` cut at a word boundary to at most `limit` characters, with an ellipsis if cut."""
+    if len(text) <= limit:
+        return text
+    return text[:limit].rsplit(" ", 1)[0].rstrip(",;:") + "…"
+
+
 _HOOK = re.compile(
     r"^(the (biggest|most|real|first|one|single|hardest)|most (people|teams|developers)|here'?s|never|always|stop|"
     r"if you|what if|why |how |the mistake|the secret|nobody|everyone|you don'?t|don'?t|\d+)",
@@ -388,7 +406,7 @@ class OfflineGenerator:
             else:
                 title = " ".join(k.capitalize() for k in kws[:3]) or f"Chapter {c.index + 1}"
             first = next((_clean(s.text) for s in segs if len(s.text.split()) >= 6), _clean(segs[0].text))
-            out.append(ChapterName(index=c.index, title=title, summary=first[:220], keywords=kws))
+            out.append(ChapterName(index=c.index, title=title, summary=_shorten(first, 220), keywords=kws))
         return ChapterNames(chapters=out)
 
     def find_clips(self, ctx: GenContext) -> ClipCandidates:
@@ -474,7 +492,7 @@ class OfflineGenerator:
             meta_description=(brief.primary_message[:157] + "...") if len(brief.primary_message) > 160 else brief.primary_message,
             keywords=top_keywords(ctx.transcript.segments, k=6),
             excerpt=brief.primary_message,
-            introduction=[Paragraph(text=f"In our recent webinar, {ctx.title}, the speakers made one point again and again: {brief.primary_message}", segment_ids=intro_ids)],
+            introduction=[Paragraph(text=f"In our recent webinar{_titled(ctx)}, one point came up again and again: {brief.primary_message}", segment_ids=intro_ids)],
             sections=sections,
             conclusion=[Paragraph(text=" ".join(t.text for t in brief.key_takeaways[:2]), segment_ids=[i for t in brief.key_takeaways[:2] for i in t.segment_ids])],
             key_takeaways=[t.text for t in brief.key_takeaways],
@@ -486,11 +504,12 @@ class OfflineGenerator:
         posts = []
         for t in brief.key_takeaways[: ctx.config.linkedin_post_count]:
             seg = ctx.transcript.get(t.segment_ids[0])
+            who = "" if seg.speaker == UNKNOWN_SPEAKER else f" {seg.speaker} made"
             text = (
-                f"{t.text}\n\nThat was one of the points {seg.speaker} made in our webinar, {ctx.title}.\n\n"
+                f"{t.text}\n\nThat was one of the points{who} in our webinar{_titled(ctx)}.\n\n"
                 f"What's your experience been? The full recording is linked in the comments."
             )
-            posts.append(SocialPost(angle=t.text[:60], text=text, hashtags=tags, segment_ids=t.segment_ids))
+            posts.append(SocialPost(angle=_shorten(t.text, 60), text=text, hashtags=tags, segment_ids=t.segment_ids))
         return LinkedInPosts(posts=posts)
 
     def quotes(self, ctx: GenContext, brief: ContentBrief) -> QuoteSet:
@@ -507,7 +526,8 @@ class OfflineGenerator:
     def visuals(self, ctx: GenContext, brief: ContentBrief, quotes: list[dict]) -> VisualBriefs:
         briefs = [
             VisualBrief(
-                kind="quote_card", title=f"Quote card: {q['speaker']}", aspect_ratio="1:1",
+                kind="quote_card", aspect_ratio="1:1",
+                title=f"Quote card: {q['speaker'] if q['speaker'] != UNKNOWN_SPEAKER else _shorten(q['quote'], 40)}",
                 layout="Large quote centred, speaker name and webinar title beneath",
                 visual_direction="Dark background, large high-contrast type, brand accent on the quotation marks.",
                 quote=q["quote"], speaker=q["speaker"], segment_ids=q["segment_ids"],
@@ -530,8 +550,8 @@ class OfflineGenerator:
         return schema.model_validate(previous)
 
 
-def make_generator(mode: str, model: str, effort: str) -> Generator:
+def make_generator(mode: str, model: str, effort: str, api_key: str | None = None) -> Generator:
     """Generator for the configured mode ("openai" or "offline")."""
     if mode == "offline":
         return OfflineGenerator()
-    return OpenAIGenerator(model=model, effort=effort)
+    return OpenAIGenerator(model=model, effort=effort, api_key=api_key)

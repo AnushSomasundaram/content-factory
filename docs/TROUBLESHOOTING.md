@@ -6,8 +6,10 @@ A failed job shows `error_message` as `"<stage>: <reason>"`, both in the dashboa
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Badge says **Offline mode** | `OPENAI_API_KEY` not set | `export OPENAI_API_KEY=…` and restart; or force it with `CF_LLM=openai` |
-| The home page says MeetStream isn't connected | `MEETSTREAM_API_KEY` not set; MeetStream is the only source of recordings | Export it and restart (or run the local stand-in, see [QUICKSTART.md](QUICKSTART.md)) |
+| Badge says **AI writing off** | No OpenAI key | Click it and add the key in Settings (or `export OPENAI_API_KEY=…` and restart) |
+| Settings says *OpenAI didn't accept that key* | Typo, revoked key, or a key from a different provider | Copy it again from platform.openai.com/api-keys |
+| Settings says *That key works, but it can't use the model …* | Your OpenAI project has no access to that model | Pick another model in Settings, e.g. `gpt-6.1-sol` |
+| The home page says MeetStream isn't connected | `MEETSTREAM_API_KEY` not set | Meeting links and bot ids need it: export it and restart. Recording links and dropped files work without it. |
 | `ffmpeg is not installed` | FFmpeg not on PATH | `brew install ffmpeg` / `apt install ffmpeg` |
 | `No such filter: 'subtitles'` in a render error | FFmpeg built without libass | Install a full build (Homebrew's `ffmpeg` has it) or set `burn_captions: false` |
 | `make_sample.py` fails on `say` | Not macOS | Use your MeetStream account instead of the sample |
@@ -23,9 +25,12 @@ A failed job shows `error_message` as `"<stage>: <reason>"`, both in the dashboa
 | `No MeetStream bot has joined that meeting link on this account…` | No bot recorded that meeting, or it was recorded with a different MeetStream key | Check the API key; if a bot did record it, paste its bot id instead |
 | `MeetStream's bot is still in that meeting…` | The meeting hasn't ended | Wait until the bot leaves, then try again |
 | `Not a MeetStream link, a Zoom / Google Meet / Teams meeting link, or a bot id.` | Some other kind of link | Paste the meeting's join link or the MeetStream recording link |
-| `…: no transcript (transcription was not enabled, …)` | The bot had no post-call transcription provider, or never got into the meeting | Run transcription afterwards with MeetStream's `transcribe_audio` tool (or REST equivalent), then retry; for future bots set `recording_config.transcript.provider`. There is no local fallback: transcripts come only from MeetStream. |
+| `…: no transcript (transcription was not enabled, …)` | The bot had no post-call transcription provider, or never got into the meeting | Run transcription afterwards with MeetStream's `transcribe_audio` tool (or REST equivalent), then retry; for future bots set `recording_config.transcript.provider`. Or download the recording and drop it in: it's transcribed locally. |
 | `…: still processing` | MeetStream is still processing after ~2 minutes of waiting | Retry in a few minutes |
 | `Download failed: HTTP 403` | Presigned link expired (they last ~1 hour) | Retry; a fresh link is fetched |
+| `That recording link has expired` / `was refused` | MeetStream's download links last about an hour | Copy a fresh link, or download the file and drop it in |
+| `No speech was found in the recording.` | Silent recording, or the wrong file | Check the file plays with sound |
+| The first local transcription is slow | The Whisper model (~500 MB for `small`) downloads once | Wait; later jobs start straight away. Set `CF_WHISPER_MODEL=base` for a smaller, faster model |
 | `The recording has no audio track…` | The bot recorded silence (e.g. muted, or joined an empty meeting) | Check the recording in MeetStream |
 | `MeetStream's transcript is not valid JSON` / `Unrecognised transcript JSON` | MeetStream returned a shape we don't parse yet | Check `meetstream_transcript.json` in the webinar folder; see [PIPELINE.md](PIPELINE.md#transcript-parsing) |
 | `The transcript contains no speech.` | Empty transcript | Check the file |

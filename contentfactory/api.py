@@ -4,9 +4,12 @@ Run:  uvicorn contentfactory.api:app --reload      (then open http://127.0.0.1:8
 
 Route groups (full reference with examples in docs/API.md):
   /api/v1/health                          mode, model, whether MeetStream/auth are configured
+  /api/v1/settings                        OpenAI key + model and MeetStream key, set from the dashboard
   /api/v1/meetstream/recordings           MeetStream bots to pick from
-  /api/v1/content-factory/jobs...         create from a MeetStream recording, poll, retry, transcript,
-                                          recording, consent, export
+  /api/v1/meetstream/resolve              check what a pasted link points at, before creating a job
+  /api/v1/content-factory/jobs...         create from a link, poll, retry, transcript, recording,
+                                          consent, export
+  /api/v1/content-factory/uploads         create from a dropped-in recording file
   /api/v1/content-factory/assets/...      read, edit (PATCH), approve / reject / request-changes /
                                           reopen / regenerate, files
   /api/v1/content-factory/clips/{id}/preview   rendered clip for the player
@@ -17,7 +20,7 @@ pipeline runs in the background. The exceptions are a clip edit (re-renders one 
 and "regenerate" (one model call), which are synchronous so the reviewer sees the result.
 
 Error mapping: ReviewError / ExportError / retry-not-allowed -> 409, schema errors -> 422,
-bad input -> 400, MeetStream unreachable -> 502.
+bad input -> 400, unsupported upload type -> 415, MeetStream unreachable -> 502.
 """
 
 from __future__ import annotations
@@ -25,20 +28,24 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import shutil
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from . import review
 from .config import Settings, load_settings
-from .db import Store
+from .db import Store, new_id
 from .drafts import JobConfig
 from .export import ExportError, build_package
-from .meetstream import MeetStreamError, RecordingLookupError, resolve_recording, summarize_bot
+from .meetstream import (
+    MEDIA_EXTENSIONS, MeetStreamClient, MeetStreamError, RecordingLookupError, check_recording_url, classify_reference, resolve_recording,
+    summarize_bot,
+)
 from .pipeline import REGENERABLE, STAGES, ContentFactory, PipelineError
 
 STATIC = Path(__file__).parent / "static"
@@ -50,11 +57,14 @@ STATIC = Path(__file__).parent / "static"
 
 
 class MeetStreamSource(BaseModel):
-    """Which MeetStream recording to process. Give either:
+    """Which recording to process. Give either:
 
     * `recording_id` (or `bot_id`): the MeetStream bot id, or
     * `link`: a MeetStream URL containing the bot id, the meeting's own Zoom / Google Meet /
-      Teams link (we find the bot that recorded it), or a bare bot id.
+      Teams link (we find the bot that recorded it), a bare bot id, or a direct link to the
+      recording file (e.g. MeetStream's S3 download link), which needs no MeetStream key.
+
+    (To process a file from disk, POST it to /uploads instead.)
     """
 
     type: Literal["meetstream_recording"]
@@ -85,6 +95,54 @@ class AssetPatch(BaseModel):
     reviewer: str = "reviewer"
     title: str | None = None
     content: dict[str, Any] | None = None
+
+
+class SettingsPatch(BaseModel):
+    """Fields left out are unchanged; an empty string removes a saved value."""
+
+    openai_api_key: str | None = None
+    openai_model: str | None = None
+    meetstream_api_key: str | None = None
+
+
+# ---------------------------------------------------------------- key checks
+# Run before a key is saved, so a typo is caught in the Settings panel rather than as a failed
+# job. Module-level so tests can replace them.
+
+
+def check_openai_key(key: str, model: str) -> None:
+    """Raise HTTPException unless `key` works and can use `model` (one cheap models.retrieve call)."""
+    import openai
+
+    try:
+        openai.OpenAI(api_key=key, max_retries=0, timeout=20).models.retrieve(model)
+    except (openai.AuthenticationError, openai.PermissionDeniedError):
+        raise HTTPException(422, "OpenAI didn't accept that key. Copy it again from platform.openai.com/api-keys.")
+    except openai.NotFoundError:
+        raise HTTPException(422, f"That key works, but it can't use the model {model}. Try another model, e.g. gpt-6.1-sol.")
+    except openai.APIConnectionError:
+        raise HTTPException(502, "Couldn't reach OpenAI to check the key. Check the internet connection.")
+    except openai.APIStatusError as e:
+        raise HTTPException(502, f"OpenAI returned an error while checking the key (HTTP {e.status_code}).")
+
+
+def check_meetstream_key(key: str, base_url: str) -> None:
+    """Raise HTTPException unless MeetStream accepts `key` (one List Bots call)."""
+    client = MeetStreamClient(key, base_url)
+    try:
+        client.list_bots()
+    except MeetStreamError as e:
+        if e.status in (401, 403):
+            raise HTTPException(422, "MeetStream didn't accept that key. Copy it again from app.meetstream.ai/api-key.")
+        raise HTTPException(502, f"Couldn't check the key with MeetStream: {e}")
+    finally:
+        client.close()
+
+
+def _key_view(value: str | None, saved: bool) -> dict:
+    """How a key is shown back: whether it's set, where from, and its last 4 characters. Never the key."""
+    return {"set": bool(value), "source": ("saved" if saved else "environment") if value else None,
+            "hint": f"…{value[-4:]}" if value and len(value) > 8 else ("set" if value else None)}
 
 
 def create_app(settings: Settings | None = None, factory: ContentFactory | None = None) -> FastAPI:
@@ -161,7 +219,38 @@ def create_app(settings: Settings | None = None, factory: ContentFactory | None 
     @app.get("/api/v1/health")
     def health() -> dict:
         return {"ok": True, "llm_mode": settings.llm_mode, "model": settings.model if settings.llm_mode == "openai" else None,
-                "meetstream_configured": bool(settings.meetstream_api_key), "auth_required": bool(api_token)}
+                "meetstream_configured": bool(settings.meetstream_api_key), "auth_required": bool(api_token),
+                "local_transcription": settings.whisper_model}
+
+    # ------------------------------------------------------------ settings
+
+    def settings_view() -> dict:
+        try:
+            saved = json.loads(settings.secrets_path.read_text())
+        except (FileNotFoundError, json.JSONDecodeError):
+            saved = {}
+        return {"openai_api_key": _key_view(settings.openai_api_key, "openai_api_key" in saved),
+                "openai_model": settings.model,
+                "meetstream_api_key": _key_view(settings.meetstream_api_key, "meetstream_api_key" in saved),
+                "llm_mode": settings.llm_mode}
+
+    @app.get("/api/v1/settings", dependencies=guarded)
+    def get_settings() -> dict:
+        return settings_view()
+
+    @app.post("/api/v1/settings", dependencies=guarded)
+    def update_settings(body: SettingsPatch) -> dict:
+        """Check new keys with their service, then save them (to data/secrets.json) and use them for the next job."""
+        changes = body.model_dump(exclude_none=True)
+        model = (changes.get("openai_model") or "").strip() or settings.model
+        new_openai = (changes.get("openai_api_key") or "").strip()
+        if new_openai or ("openai_model" in changes and settings.openai_api_key):
+            check_openai_key(new_openai or settings.openai_api_key, model)
+        if (changes.get("meetstream_api_key") or "").strip():
+            check_meetstream_key(changes["meetstream_api_key"].strip(), settings.meetstream_base_url)
+        settings.save(**changes)
+        factory.settings_changed()
+        return settings_view()
 
     # ------------------------------------------------------------ MeetStream recordings
 
@@ -183,38 +272,72 @@ def create_app(settings: Settings | None = None, factory: ContentFactory | None 
 
     # ------------------------------------------------------------ jobs
 
-    def resolve(ref: str):
-        """Resolve a pasted link/id to a recording, mapping failures to HTTP errors."""
+    def lookup(ref: str) -> dict:
+        """What a pasted link or id points at, checked now; failures become HTTP errors with the reason.
+
+        Recording links are checked by fetching their first byte and need no MeetStream key;
+        everything else is resolved through MeetStream.
+        """
         try:
-            client = factory.meetstream()
-        except MeetStreamError as e:
-            raise HTTPException(400, str(e))
+            kind, value = classify_reference(ref or "")
+        except RecordingLookupError as e:
+            raise HTTPException(422, str(e))
+        if kind == "recording_url":
+            try:
+                info = check_recording_url(value, factory.url_transport)
+            except RecordingLookupError as e:
+                raise HTTPException(422, str(e))
+            uses_meetstream = bool(info["bot_id"] and settings.meetstream_api_key)
+            return {"resolved_from": "recording_url", "url": value, "bot_id": info["bot_id"], "bot": None,
+                    "other_matches": [], "expires_at": info["expires_at"], "size": info["size"],
+                    "transcript": "meetstream" if uses_meetstream else "local"}
+        if not settings.meetstream_api_key:
+            raise HTTPException(422, "MeetStream isn't connected (MEETSTREAM_API_KEY isn't set on the server), so meeting "
+                                     "links and bot ids can't be looked up. Paste the recording's download link, or drop the file in.")
+        client = factory.meetstream()
         try:
-            return resolve_recording(client, ref)
+            r = resolve_recording(client, ref)
         except RecordingLookupError as e:  # the link doesn't lead to a recording: the user's to fix
             raise HTTPException(422, str(e))
         except MeetStreamError as e:  # MeetStream refused or failed
             raise HTTPException(502, str(e))
         finally:
             client.close()
+        return {"bot_id": r.bot_id, "resolved_from": r.resolved_from, "bot": r.bot, "other_matches": r.other_matches,
+                "transcript": "meetstream"}
 
     @app.get("/api/v1/meetstream/resolve", dependencies=guarded)
     def resolve_link(link: str) -> dict:
         """Preview which recording a pasted link refers to, before starting a job."""
-        r = resolve(link)
-        return {"bot_id": r.bot_id, "resolved_from": r.resolved_from, "bot": r.bot,
-                "other_matches": r.other_matches}
+        return lookup(link)
 
     @app.post(f"{P}/jobs", status_code=202, dependencies=guarded)
     def create_job(body: CreateJob) -> dict:
-        if not settings.meetstream_api_key:
-            raise HTTPException(400, "MEETSTREAM_API_KEY is not configured on the server.")
-        source = body.source.model_dump()
-        # Resolve now, so a reference that leads to no recording fails immediately rather than in a job.
-        r = resolve(body.source.link or body.source.bot_id)
-        source.update(bot_id=r.bot_id, resolved_from=r.resolved_from)
-        job = factory.submit(source, body.configuration)
-        return job_view(job)
+        # Check now, so a reference that leads to no recording fails immediately rather than in a job.
+        found = lookup(body.source.link or body.source.bot_id)
+        if found["resolved_from"] == "recording_url":
+            source = {"type": "recording_url", "url": found["url"], "bot_id": found["bot_id"], "title": body.source.title}
+        else:
+            source = {**body.source.model_dump(), "bot_id": found["bot_id"], "resolved_from": found["resolved_from"]}
+        return job_view(factory.submit(source, body.configuration))
+
+    @app.post(f"{P}/uploads", status_code=202, dependencies=guarded)
+    def upload_job(recording: UploadFile = File(...), title: str = Form(default=""),
+                   configuration: str = Form(default="{}")) -> dict:
+        """Create a job from a dropped-in recording file. It is transcribed locally."""
+        ext = Path(recording.filename or "").suffix.lower()
+        if ext not in MEDIA_EXTENSIONS:
+            raise HTTPException(415, f"{recording.filename}: not a recording file this app reads ({', '.join(MEDIA_EXTENSIONS)}).")
+        try:
+            config = JobConfig.model_validate(json.loads(configuration or "{}"))
+        except (json.JSONDecodeError, ValidationError) as e:
+            raise HTTPException(422, f"Invalid configuration: {e}")
+        dest = settings.data_dir / "uploads" / new_id("up") / f"recording{ext}"
+        dest.parent.mkdir(parents=True)
+        with dest.open("wb") as out:
+            shutil.copyfileobj(recording.file, out, 1 << 20)
+        source = {"type": "upload", "upload_path": str(dest), "filename": recording.filename, "title": title.strip() or None}
+        return job_view(factory.submit(source, config))
 
     @app.get(f"{P}/jobs", dependencies=guarded)
     def list_jobs() -> list[dict]:

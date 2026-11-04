@@ -18,7 +18,7 @@ New here? Start with the **[Quick start](QUICKSTART.md)**: about 10 minutes from
 
 ## The product in one paragraph
 
-You give it a webinar recorded by MeetStream (the only source of recordings and transcripts). It produces:
+You give it a webinar recording: a MeetStream recording (by meeting link, bot id or download link) or a file you drop in. It produces:
 - chapters;
 - short video clips with captions, in landscape and portrait;
 - a blog draft;

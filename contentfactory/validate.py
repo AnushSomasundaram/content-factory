@@ -18,7 +18,7 @@ from __future__ import annotations
 import re
 
 from .drafts import ClipCandidate, JobConfig
-from .ir import Segment, Transcript, normalize_text
+from .ir import Segment, Transcript, fmt_clock, normalize_text
 from .segmentation import TRANSITION
 
 # Clip score = sum(sub_score[0-10] * weight) / 10, giving 0-100. Weights are the product spec's
@@ -236,6 +236,12 @@ def recording_warnings(transcript: Transcript) -> list[dict]:
     if confs and sum(confs) / len(confs) < LOW_CONFIDENCE:
         out.append(note("warning", "low_confidence", f"Average transcription confidence is {sum(confs) / len(confs):.0%}; "
                         "expect caption errors."))
+    last_speech = transcript.segments[-1].end
+    if transcript.duration - last_speech > max(30.0, 0.25 * transcript.duration):
+        # Usually a recording left running after the talk ended, or a muted microphone.
+        out.append(note("warning", "no_speech_at_end",
+                        f"There's no speech after {fmt_clock(last_speech)} (the recording runs {fmt_clock(transcript.duration)}), "
+                        "so everything here comes from the part before that."))
     flagged = [s for s in transcript.segments if _SENSITIVE.search(s.text) or _EMAIL.search(s.text) or _PHONE.search(s.text)]
     if flagged:
         out.append(note("warning", "sensitive_content",

@@ -5,7 +5,7 @@
 .venv/bin/python -m pytest -q -k quote   # by name
 ```
 
-The suite needs FFmpeg (the end-to-end tests render real clips). It needs **no network and no API keys**: OpenAI and MeetStream are mocked at the HTTP layer.
+The suite needs FFmpeg (the end-to-end tests render real clips). It needs **no network and no API keys**: OpenAI and MeetStream are mocked at the HTTP layer, and local transcription is replaced by a fake (`fake_transcriber`), so no Whisper model is downloaded.
 
 ## What's covered
 
@@ -14,7 +14,7 @@ The suite needs FFmpeg (the end-to-end tests render real clips). It needs **no n
 | `tests/test_ingest.py` | MeetStream segment-list and participant-keyed formats, transcripts without word timings, non-JSON and empty transcripts, caption cue timing and format |
 | `tests/test_validate.py` | Quote verification (exact, spanning segments, paraphrase rejected, wrong citation corrected), clip snapping/padding/scoring, topic-change and length trimming, unknown ids, overlap and score filtering, citation resolution, sensitive-content flags, chapter boundaries on the sample, the review state machine |
 | `tests/test_clients.py` | OpenAI request shape (Responses API, model, reasoning effort, strict structured output schema, transcript in the cached instructions, `prompt_cache_key`, `store: false`, no sampling params), structured parsing, refusal and truncation → readable errors, auth error; MeetStream `Token` auth, 202 handling, bot summaries; resolving links (meeting-link normalisation across Zoom/Meet/Teams variants, MeetStream URLs, newest finished recording wins, live, denied and unmatched meetings, pagination that stops if the cursor is ignored) |
-| `tests/test_api.py` | Full runs through the HTTP API with a fake MeetStream: real FFmpeg renders, a job started from a Zoom link (and links refused with a reason), every asset type, the review rules, edits re-rendering clips, verbatim enforcement, consent and approval gates, ZIP contents and manifest; a recording with no audio; no upload route; API token auth |
+| `tests/test_api.py` | Full runs through the HTTP API with a fake MeetStream: real FFmpeg renders, a job started from a Zoom link (and links refused with a reason), every asset type, the review rules, edits re-rendering clips, verbatim enforcement, consent and approval gates, ZIP contents and manifest; a recording with no audio; a job from a MeetStream download link (using MeetStream's transcript) and an expired one refused; a dropped-in file transcribed and processed; recording links without a MeetStream key; API token auth |
 
 ## Fixtures
 

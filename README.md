@@ -1,9 +1,9 @@
 # MeetStream Content Factory
 
-Turn one webinar recorded by MeetStream into a content package: chapters, short video clips with captions, a blog draft, LinkedIn posts, verified quotes and Canva-ready design briefs. Each asset is tied to the moment in the recording it came from, and each one goes through human review before export. **Nothing is ever published.**
+Turn one webinar recording into a content package: chapters, short video clips with captions, a blog draft, LinkedIn posts, verified quotes and Canva-ready design briefs. Each asset is tied to the moment in the recording it came from, and each one goes through human review before export. **Nothing is ever published.**
 
 ```
-MeetStream recording   ─► transcript IR ─► chapters ─► content brief ─┬─► clips ─► FFmpeg render ─┐
+recording / MeetStream ─► transcript IR ─► chapters ─► content brief ─┬─► clips ─► FFmpeg render ─┐
                             (segment ids)   (TextTiling   (shared story)  ├─► blog                    ├─► QA ─► review queue ─► ZIP export
                                              + OpenAI)                    ├─► LinkedIn posts           │
                                                                           └─► quotes ─► visual briefs ─┘
@@ -11,27 +11,21 @@ MeetStream recording   ─► transcript IR ─► chapters ─► content brief
 
 ## Quick start
 
-Recordings and transcripts come **only from MeetStream**, and **OpenAI** finds the best moments and writes the content.
-
-With real keys:
-
 ```bash
 uv venv && uv pip install -e ".[mcp,dev]"
-export MEETSTREAM_API_KEY=ms_...    # where recordings and transcripts come from
-export OPENAI_API_KEY=sk-...        # picks the clips and writes the content
-.venv/bin/uvicorn contentfactory.api:app --reload
+.venv/bin/uvicorn contentfactory.api:app
 ```
 
-Open http://127.0.0.1:8000 and paste a MeetStream link, the meeting's Zoom/Meet/Teams link, or a bot id. Review each item (click any ▶ time to hear it in the original recording), approve what you'd publish, then **Download**.
+Open http://127.0.0.1:8000. Click **Settings** (top right) to add your **OpenAI key**, which picks the clips and writes the content, and optionally a **MeetStream key**, for meeting links and bot ids. Each key is checked before it's saved. (Environment variables `OPENAI_API_KEY` / `MEETSTREAM_API_KEY` work too.) Then either:
+- **drop a recording file in** (MP4, MOV, WebM, MP3, WAV…); it's transcribed locally, no key needed;
+- **paste a recording link**, such as MeetStream's download link for a recording; with `MEETSTREAM_API_KEY` set, MeetStream's speaker-labelled transcript is used, otherwise it's transcribed locally;
+- **paste a meeting link or bot id** (needs `MEETSTREAM_API_KEY`): the meeting's Zoom/Meet/Teams link, a MeetStream link, or a bot id.
 
-**No keys yet?** `scripts/demo_meetstream.py` plays MeetStream on localhost with a sample webinar, and without `OPENAI_API_KEY` the app runs in **offline mode** (drafts built by rearranging the speakers' own sentences). That's enough to try the whole workflow:
+Review each item (click any ▶ time to hear it in the original recording), approve what you'd publish, then **Download**.
 
-```bash
-.venv/bin/python scripts/make_sample.py samples                    # a ~4 min sample webinar (macOS)
-.venv/bin/uvicorn --app-dir scripts demo_meetstream:app --port 8765 &
-MEETSTREAM_API_KEY=demo MEETSTREAM_BASE_URL=http://127.0.0.1:8765/api/v1 .venv/bin/uvicorn contentfactory.api:app
-# then paste https://zoom.us/j/8812345678 into the dashboard
-```
+**Without an OpenAI key** the app runs in **offline mode**: drafts are the speakers' own sentences rearranged by simple rules. That's enough to try the workflow, but the writing and clip picks are only good with the key.
+
+**Without a MeetStream account,** `scripts/demo_meetstream.py` plays MeetStream locally with a sample webinar, for trying meeting links (see the quick start).
 
 The full walkthrough is in **[docs/QUICKSTART.md](docs/QUICKSTART.md)**.
 

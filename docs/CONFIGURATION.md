@@ -4,13 +4,16 @@
 
 Read once at startup (`contentfactory/config.py`). Every one is optional.
 
+The **OpenAI key, OpenAI model and MeetStream key** can also be set in the dashboard (**Settings**, top right), or with `POST /api/v1/settings`. Each key is checked with its service first. Saved values go in `<CF_DATA_DIR>/secrets.json` (file mode 600), take precedence over the environment, survive restarts, and apply from the next job on. Removing a saved key falls back to the environment variable.
+
 | Variable | Default | Meaning |
 |---|---|---|
-| `OPENAI_API_KEY` | (unset) | Enables generation with OpenAI. `OPENAI_BASE_URL`, `OPENAI_ORG_ID` and `OPENAI_PROJECT_ID` are read by the SDK too. |
-| `CF_LLM` | `openai` if `OPENAI_API_KEY` is set, else `offline` | Force a generator: `openai` or `offline` |
+| `OPENAI_API_KEY` | (unset) | Enables generation with OpenAI (or set it in Settings). `OPENAI_BASE_URL`, `OPENAI_ORG_ID` and `OPENAI_PROJECT_ID` are read by the SDK too. |
+| `CF_LLM` | `openai` if an OpenAI key is set, else `offline` | Force a generator: `openai` or `offline` |
 | `CF_MODEL` | `gpt-6-astra` | OpenAI model id, e.g. `gpt-6.1-sol` for lower cost |
 | `CF_EFFORT` | `medium` | Reasoning effort: `low` / `medium` / `high` / `xhigh` / `max`. Higher is better and slower. |
-| `MEETSTREAM_API_KEY` | (unset) | Required to process anything: MeetStream is the only source of recordings and transcripts (`ms_…`, from app.meetstream.ai/api-key) |
+| `MEETSTREAM_API_KEY` | (unset) | Lets you paste meeting links, bot ids and MeetStream links, and uses MeetStream's speaker-labelled transcripts (`ms_…`, from app.meetstream.ai/api-key). Dropped files and recording links work without it. |
+| `CF_WHISPER_MODEL` | `small` | Local speech-to-text model for recordings without a MeetStream transcript: `tiny`, `base`, `small`, `medium`, `large-v3`. Bigger is more accurate and slower; `small` takes about 3 minutes per hour of audio on a laptop CPU. Downloaded once on first use. |
 | `MEETSTREAM_BASE_URL` | `https://api.meetstream.ai/api/v1` | Point at a mock or staging server, e.g. `scripts/demo_meetstream.py` |
 | `CF_DATA_DIR` | `./data` | Database, recordings, renders and exports |
 | `CF_JOB_WORKERS` | `2` | Jobs processed at the same time. Each uses CPU for FFmpeg and makes up to 3 concurrent model calls. |
@@ -27,7 +30,7 @@ set -a; source .env; set +a
 
 ## Per-job options (`JobConfig`)
 
-Sent as `configuration` when creating a job. Stored on the job, so retries use the same settings.
+Sent as `configuration` when creating a job (a JSON body, or a JSON string in the upload form). Stored on the job, so retries use the same settings.
 
 | Field | Type / range | Default | Effect |
 |---|---|---|---|

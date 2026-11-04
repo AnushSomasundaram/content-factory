@@ -32,22 +32,33 @@ The weights only drive the progress bar.
 
 The raw responses are saved next to the recording, for debugging. Details are in [MEETSTREAM.md](MEETSTREAM.md).
 
-MeetStream is the **only source** of recordings and transcripts: there is no upload path and no local speech-to-text. The download then goes through `_finish_webinar`:
+**Recording-link source** (`_ingest_url`), e.g. MeetStream's S3 download link for a recording, or any direct `.mp4`/`.mp3`/… URL. The API has already checked the link works (and, for presigned links, that it hasn't expired).
+
+1. Download the file. The default title comes from the file name.
+2. If it's a MeetStream link (the bot id is in its path) and `MEETSTREAM_API_KEY` is set, fetch that bot's transcript. If MeetStream has none, an info note says so and the recording is transcribed locally.
+3. Otherwise transcribe locally.
+
+**Dropped-file source** (`_ingest_upload`): the API saved the file under `uploads/`; it's copied into the webinar folder and transcribed locally.
+
+**Local transcription** (`ingest.transcribe_media`) runs [faster-whisper](https://github.com/SYSTRAN/faster-whisper) on the CPU, no key needed: the `small` model (`CF_WHISPER_MODEL`) takes about 3 minutes per hour of audio, and is downloaded once on first use. Audio is decoded with FFmpeg. Whisper's output windows often end mid-sentence, so all words are joined into one stream and split into sentences at their punctuation. There are no speaker names: everyone is "Speaker", and the dashboard hides that label.
+
+Every path then goes through `_finish_webinar`:
 
 1. `ffprobe` the recording. If it has **no audio track**, the job fails: *"nothing to clip"*.
-2. Parse MeetStream's transcript (`ingest.parse_transcript`).
+2. Parse MeetStream's transcript (`ingest.parse_transcript`), or transcribe locally.
 3. Save `transcript.json` and record `has_video` and `duration_seconds`.
 
-Then two job-level checks run on the transcript:
+Then job-level checks run on the transcript:
 
 - **Low confidence:** mean word confidence below 75% gives a `low_confidence` warning.
+- **Silent ending:** no speech in the last 30 s and 25% of the recording (a recording left running, or a muted mic) gives a `no_speech_at_end` warning saying where speech stops.
 - **Sensitive content:** a pattern match for *confidential, NDA, off the record, don't share, not public yet, unannounced, password, API key, salary*, plus emails and phone numbers. The matching segment ids are listed in a `sensitive_content` warning.
 
 If there's no video, a `no_video` warning explains that clips will be audio excerpts.
 
 ### Transcript parsing
 
-`ingest.py` accepts the shapes MeetStream's transcript endpoint returns (which one depends on the bot's transcription provider):
+`ingest.py` parses the shapes MeetStream's transcript endpoint returns (which one depends on the bot's transcription provider):
 
 | Format | Detected by | Notes |
 |---|---|---|

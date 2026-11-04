@@ -40,10 +40,33 @@ Errors look like `{"detail": "<message>"}`, or a list of field errors for 422.
 ### `GET /api/v1/health`
 
 ```json
-{"ok": true, "llm_mode": "openai", "model": "gpt-6-astra", "meetstream_configured": true, "auth_required": false}
+{"ok": true, "llm_mode": "openai", "model": "gpt-6-astra", "meetstream_configured": true, "auth_required": false,
+ "local_transcription": "small"}
 ```
 
-`llm_mode` is `"openai"` or `"offline"`. `model` is `null` offline.
+`llm_mode` is `"openai"` or `"offline"`. `model` is `null` offline. `local_transcription` is the Whisper model used for recordings without a MeetStream transcript.
+
+## Settings
+
+### `GET /api/v1/settings`
+
+The keys the app is using, without revealing them:
+
+```json
+{"openai_api_key": {"set": true, "source": "saved", "hint": "…1234"}, "openai_model": "gpt-6-astra",
+ "meetstream_api_key": {"set": false, "source": null, "hint": null}, "llm_mode": "openai"}
+```
+
+`source` is `saved` (set from the dashboard) or `environment`.
+
+### `POST /api/v1/settings`
+
+```bash
+curl -X POST $B/api/v1/settings -H 'Content-Type: application/json' \
+  -d '{"openai_api_key": "sk-...", "openai_model": "gpt-6-astra", "meetstream_api_key": "ms_..."}'
+```
+
+Fields left out are unchanged; `""` removes a saved value. A new key is checked first (OpenAI: `models.retrieve` of the model; MeetStream: List Bots), and a key the service refuses returns **422** with the reason and saves nothing. On success the values are saved to `data/secrets.json` (mode 600) and used from the next job on. Returns the same shape as `GET`.
 
 ---
 
@@ -51,7 +74,7 @@ Errors look like `{"detail": "<message>"}`, or a list of field errors for 422.
 
 ### `GET /api/v1/meetstream/resolve?link=…`
 
-Which recording a pasted link refers to: a bot id, a MeetStream URL, or a Zoom / Meet / Teams meeting link. See [MEETSTREAM.md](MEETSTREAM.md#pointing-it-at-a-recording).
+Which recording a pasted link refers to: a bot id, a MeetStream URL, a Zoom / Meet / Teams meeting link, or a direct link to a recording file. See [MEETSTREAM.md](MEETSTREAM.md#pointing-it-at-a-recording).
 
 ```bash
 curl -G "$B/api/v1/meetstream/resolve" --data-urlencode "link=https://zoom.us/j/8812345678?pwd=abc"
@@ -63,7 +86,17 @@ curl -G "$B/api/v1/meetstream/resolve" --data-urlencode "link=https://zoom.us/j/
  "other_matches": [{"bot_id": "bot_7", "status": "Stopped", "created_at": "2026-09-01T15:00:00Z", "…": "…"}]}
 ```
 
-`resolved_from` is `bot_id`, `meetstream_url` or `meeting_link`; `bot` and `other_matches` are only filled for meeting links. Returns 422 with the reason if the link leads to no usable recording, and 502 if MeetStream fails.
+`resolved_from` is `bot_id`, `meetstream_url`, `meeting_link` or `recording_url`. `bot` is MeetStream's summary of the bot (none for recording links); `other_matches` lists older recordings of the same meeting. `transcript` is `"meetstream"` or `"local"` (transcribed here).
+
+For a recording link, the response also has `url`, `size` (bytes) and `expires_at` (for presigned links), and needs no MeetStream key:
+
+```json
+{"resolved_from": "recording_url", "bot_id": "12f3c103-…", "bot": null, "other_matches": [], "transcript": "local",
+ "url": "https://ms-s3-bucket-meetstream-….s3.amazonaws.com/12f3c103-…/meeting_recording.mp4?…",
+ "size": 1265338, "expires_at": "2026-11-03T15:21:31+00:00"}
+```
+
+Returns 422 with the reason if the link leads to no usable recording (including an expired download link, or a meeting link while `MEETSTREAM_API_KEY` isn't set), and 502 if MeetStream fails.
 
 ### `GET /api/v1/meetstream/recordings`
 
@@ -90,7 +123,7 @@ Returns 400 if `MEETSTREAM_API_KEY` isn't set, and 502 if MeetStream returns an 
 
 ## Jobs
 
-### `POST /api/v1/content-factory/jobs`: package a MeetStream recording
+### `POST /api/v1/content-factory/jobs`: package a recording from a link
 
 ```bash
 # By meeting link (or a MeetStream link, or a bot id): resolved to the meeting's recording
@@ -103,18 +136,39 @@ curl -X POST $P/jobs -H 'Content-Type: application/json' -d '{
 curl -X POST $P/jobs -H 'Content-Type: application/json' -d '{
   "source": {"type": "meetstream_recording", "recording_id": "0c0f8353-ad37-43af-ac53-322f23d44743"}
 }'
+
+# By a direct link to the recording file, e.g. MeetStream's download link (no MeetStream key needed)
+curl -X POST $P/jobs -H 'Content-Type: application/json' -d '{
+  "source": {"type": "meetstream_recording", "link": "https://ms-s3-bucket-meetstream-….s3.amazonaws.com/<bot id>/meeting_recording.mp4?X-Amz-…"}
+}'
 ```
 
 - Give **either** `source.link` **or** `source.recording_id`:
-  - `link` takes a bot id, any MeetStream URL containing one, or the meeting's own Zoom / Meet / Teams link. It's resolved before the job is created, and the job's `source` records `bot_id` and `resolved_from`. A link that leads nowhere returns **422** with the reason, and no job is created.
+  - `link` takes a bot id, any MeetStream URL containing one, the meeting's own Zoom / Meet / Teams link, or a direct link to a recording file. It's checked before the job is created. A link that leads nowhere returns **422** with the reason, and no job is created.
+  - A **recording link** is checked by fetching its first byte (an expired presigned link is refused), and needs no MeetStream key. The job's `source` becomes `{"type": "recording_url", "url", "bot_id"}`: if the link is a MeetStream download link, `bot_id` is taken from it and MeetStream's transcript is used when `MEETSTREAM_API_KEY` is set; otherwise the recording is transcribed locally.
+  - Every other kind needs `MEETSTREAM_API_KEY` (**422** without it), and the job's `source` records `bot_id` and `resolved_from`.
   - `recording_id` (alias `bot_id`) is the MeetStream bot id.
   - Either way, the recording is checked with MeetStream first: an unknown id, another account's bot, or a bot still in its meeting returns **422** with the reason.
-- `title` is optional. The default is "<Platform> recording <date>".
+- `title` is optional. The default is "<Platform> recording <date>", or the file name for recording links.
 - `configuration` is optional. Every field is described in [CONFIGURATION.md](CONFIGURATION.md#per-job-options-jobconfig).
 
 The response is **202** with the job (see [Job object](#job-object)). Processing happens in the background.
 
-There is no upload endpoint: MeetStream is the only source of recordings and transcripts. To try the API without a MeetStream account, run the local stand-in (`scripts/demo_meetstream.py`, see [QUICKSTART.md](QUICKSTART.md)).
+### `POST /api/v1/content-factory/uploads`: package a recording file
+
+Multipart form. The recording is transcribed locally (no keys needed).
+
+| Field | Required | Notes |
+|---|---|---|
+| `recording` | yes | `.mp4 .mov .webm .mkv .m4a .mp3 .wav` (anything else is **415**) |
+| `title` | no | Default: from the file name |
+| `configuration` | no | JobConfig as a JSON **string** |
+
+```bash
+curl -X POST $P/uploads -F recording=@meeting_recording.mp4 -F 'configuration={"clip_count": 3}'
+```
+
+The response is **202** with the job, whose `source` is `{"type": "upload", "filename", …}`.
 
 ### `GET /api/v1/content-factory/jobs`
 

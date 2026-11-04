@@ -1,8 +1,8 @@
 # Quick start
 
-This takes you from a fresh clone to a reviewed, exported content package in about 10 minutes.
+This takes you from a fresh clone to a reviewed, downloaded content package in about 10 minutes.
 
-The app takes recordings and transcripts **only from MeetStream**, and uses **OpenAI** to find the best moments and write the content. Parts 1-4 need no API keys: a local stand-in plays MeetStream with a sample webinar, and the app runs without OpenAI in offline mode. Parts 5 and 6 switch on OpenAI and your real MeetStream account.
+You can start from **a recording file you already have**: drop it in and it's transcribed locally, no keys needed. An **OpenAI** key picks the best moments and writes the content; without it, drafts are rough. A **MeetStream** key lets you paste meeting links and bot ids, and brings transcripts with speaker names.
 
 ## What you need
 
@@ -11,7 +11,7 @@ The app takes recordings and transcripts **only from MeetStream**, and uses **Op
 | Python 3.11+ | `python3 --version` | python.org, or `brew install python@3.12` |
 | [uv](https://docs.astral.sh/uv/) (recommended) | `uv --version` | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
 | FFmpeg with libass and libfreetype | `ffmpeg -filters \| grep subtitles` | `brew install ffmpeg` / `apt install ffmpeg` |
-| macOS (only for the sample webinar) | `which say` | Elsewhere, skip Parts 2-4 and go straight to your MeetStream account (Parts 5-6) |
+| macOS (only for the sample webinar) | `which say` | Elsewhere, use any recording you have |
 
 ## Part 1: Install
 
@@ -29,46 +29,27 @@ Check that it works:
 .venv/bin/python -m pytest -q
 ```
 
-You should see `36 passed`. The tests render real video with FFmpeg, so they take about 20 seconds.
+You should see `40 passed`. The tests render real video with FFmpeg, so they take about 20 seconds.
 
-## Part 2: Make a sample webinar
-
-```bash
-.venv/bin/python scripts/make_sample.py samples
-```
-
-This takes under a minute. You get:
-- `samples/sample_webinar.mp4`: a ~4-minute "webinar" with two speakers, and slides for each section;
-- `samples/sample_transcript.json`: its transcript, in MeetStream's own format.
-
-The script uses macOS text-to-speech, so the voices sound robotic. The timings are exact, though, which is what matters here.
-
-## Part 3: Run the app against a local MeetStream
-
-Start the MeetStream stand-in. It serves the sample as a finished bot recording, through the same API routes as the real MeetStream:
+## Part 2: Start the app
 
 ```bash
-.venv/bin/uvicorn --app-dir scripts demo_meetstream:app --port 8765
-```
-
-In a second terminal, start the app pointed at it:
-
-```bash
-MEETSTREAM_API_KEY=demo MEETSTREAM_BASE_URL=http://127.0.0.1:8765/api/v1 \
-  .venv/bin/uvicorn contentfactory.api:app --reload
+.venv/bin/uvicorn contentfactory.api:app
 ```
 
 Open **http://127.0.0.1:8000**. The badge in the top right says **AI writing off**. That's expected: you haven't added an OpenAI key yet.
 
 > **Offline mode** builds drafts with simple rules, mostly by picking and arranging sentences the speakers actually said. It lets you try the whole workflow, but the writing is not what the product produces with OpenAI.
 
-## Part 4: Make, review and download a package
+## Part 3: Make, review and download a package
 
-1. Paste `https://zoom.us/j/8812345678` into the big box. Underneath, it says **✓ Found the recording**: the latest of two recordings of that meeting.
-2. Optionally open **Options** to set a title, the audience, tone and number of clips. Then click **Create content**.
-3. A checklist shows each step as it happens. Offline, the whole thing takes about 30 seconds; most of that is FFmpeg cutting 4 clips in two formats.
+You need a recording: any MP4, MOV, WebM, MP3, WAV or M4A of someone talking. No recording to hand? On macOS, `.venv/bin/python scripts/make_sample.py samples` makes a ~4-minute two-speaker webinar at `samples/sample_webinar.mp4`.
 
-Also try `https://meet.google.com/abc-defg-hij`: the bot is still in that meeting, so it says so straight away instead of creating anything.
+1. Optionally open **Options** to set a title, the audience, tone and number of clips.
+2. **Drop the file** onto **Drop a recording here** (or click it to choose the file). It uploads with a progress bar.
+3. A checklist shows each step as it happens. The first time, the speech-to-text model (~500 MB) downloads, which takes a minute or two. After that, a 4-minute recording takes about 30 seconds: transcription, then FFmpeg cutting the clips in two formats.
+
+You can also **paste a link to the recording file** instead, such as MeetStream's download link for a recording. The box checks it as you paste ("✓ The recording link works … link expires in 42 min"); an expired link is refused straight away.
 
 When it's done you land on the review screen:
 - **At the top:** how many items are approved, rejected and still to decide, and the **Download** button.
@@ -91,44 +72,40 @@ Try these:
 
 The ZIP has `manifest.json`, `blog.md` (if you approved the blog), the clips, captions and the transcript. Only approved assets are included. The manifest records who approved each one and when, plus file checksums.
 
-## Part 5: Turn on OpenAI
+## Part 4: Turn on OpenAI
 
-Get an API key from https://platform.openai.com/api-keys. Then stop the app (leave the stand-in running) and run:
+Get an API key from https://platform.openai.com/api-keys. In the dashboard, click **Settings** (or the **AI writing off · add key** badge), paste the key and click **Save**. It's checked with OpenAI first: a wrong key, or a key that can't use the chosen model, is refused with the reason. Saved keys go in `data/secrets.json` (readable only by you) and are used from the next package on, with no restart.
 
-```bash
-export OPENAI_API_KEY=sk-...
-MEETSTREAM_API_KEY=demo MEETSTREAM_BASE_URL=http://127.0.0.1:8765/api/v1 \
-  .venv/bin/uvicorn contentfactory.api:app --reload
-```
+The badge now reads **AI: gpt-6-astra**, and cards get a **Rewrite with AI** button. Make a package from the same recording again: OpenAI now picks the clips and actually writes the chapter titles, blog, posts and briefs. Expect a few minutes even for a short recording, most of it waiting on the model. The blog, posts and quotes are generated in parallel to keep that down.
 
-The badge now reads **AI: gpt-6-astra**, and cards get a **Rewrite with AI** button. Generate a package from the same link again: OpenAI now picks the clips and actually writes the chapter titles, blog, posts and briefs. Expect a few minutes even for a short recording, most of it waiting on the model. The blog, posts and quotes are generated in parallel to keep that down.
+You can also set keys as environment variables instead (`export OPENAI_API_KEY=sk-...` before starting the app, or put them in `.env` and run `set -a; source .env; set +a`). A key saved in Settings takes precedence.
 
-To keep keys in a file instead:
-
-```bash
-cp .env.example .env    # then edit .env
-set -a; source .env; set +a
-```
-
-## Part 6: Use your MeetStream account
+## Part 5: Connect your MeetStream account
 
 1. Create a MeetStream API key at https://app.meetstream.ai/api-key.
-2. Stop both servers, and start the app against the real MeetStream (no `MEETSTREAM_BASE_URL`):
-   ```bash
-   export MEETSTREAM_API_KEY=ms_...
-   .venv/bin/uvicorn contentfactory.api:app --reload
-   ```
+2. Paste it into **Settings** → **MeetStream API key** and click **Save**. (Or `export MEETSTREAM_API_KEY=ms_...` before starting the app.)
 3. On the home page, either:
    - paste the meeting's own Zoom / Google Meet / Teams link, a MeetStream link to the recording, or a bot id. It shows which recording it found. Or:
-   - click **Pick from your recent recordings**.
+   - click **Pick from your recent MeetStream recordings**.
 
    Then click **Create content**.
 
 The app fetches the bot's transcript and video, falling back to audio if there's no video, then runs the same pipeline.
 
+MeetStream download links now use the bot's transcript too, with speaker names, instead of transcribing locally.
+
+**No MeetStream account, but want to try meeting links?** `scripts/demo_meetstream.py` plays MeetStream locally with the sample webinar:
+
+```bash
+.venv/bin/uvicorn --app-dir scripts demo_meetstream:app --port 8765 &
+MEETSTREAM_API_KEY=demo MEETSTREAM_BASE_URL=http://127.0.0.1:8765/api/v1 .venv/bin/uvicorn contentfactory.api:app
+```
+
+Then paste `https://zoom.us/j/8812345678` (two recordings of that meeting; the newest is used) or `https://meet.google.com/abc-defg-hij` (the bot is still in the meeting, so it's refused with the reason). Stop it before using your real account.
+
 **For good video clips, the bot must have recorded video,** and for a transcript it needs a post-call transcription provider. MeetStream's REST API records video by default, but bots created through their MCP server are audio-only unless you ask for video. See [MEETSTREAM.md](MEETSTREAM.md#setting-up-bots-for-the-content-factory) for the recommended bot settings.
 
-## Part 7 (optional): Use it from an AI agent
+## Part 6 (optional): Use it from an AI agent
 
 With the server still running:
 
@@ -145,6 +122,7 @@ Everything lives under `./data` (change it with `CF_DATA_DIR`). Delete the folde
 ```
 data/
   contentfactory.db                 jobs, assets, versions, reviews
+  uploads/<id>/                     dropped-in files, as received
   webinars/<id>/recording.mp4       the source recording
   webinars/<id>/transcript.json     the transcript every citation points into
   jobs/<id>/clips/*.mp4             rendered clips

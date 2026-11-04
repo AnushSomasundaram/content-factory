@@ -1,10 +1,13 @@
-"""Turn a MeetStream transcript into the sentence-level IR (see `ir.py`).
+"""Turn a transcript into the sentence-level IR (see `ir.py`).
 
-MeetStream is the only source of transcripts. Its API returns one of two shapes, depending
-on the transcription provider, and we also re-read our own saved IR:
-  * segment-list transcripts (`speaker`, `transcript`, `start_time`, `end_time`, `words`)
-  * participant-keyed transcripts (`participant.name`, `words[].start_timestamp.relative`)
-  * our own IR JSON (`{"webinar_id": ..., "segments": [...]}`), e.g. a saved transcript.json
+Where transcripts come from:
+  * MeetStream's API, for MeetStream recordings. It returns one of two shapes, depending on
+    the transcription provider:
+      - segment-list transcripts (`speaker`, `transcript`, `start_time`, `end_time`, `words`)
+      - participant-keyed transcripts (`participant.name`, `words[].start_timestamp.relative`)
+  * Local speech-to-text (`transcribe_media`, faster-whisper), for a recording that was
+    dropped in or linked without a MeetStream transcript.
+  * Our own IR JSON (`{"webinar_id": ..., "segments": [...]}`), e.g. a saved transcript.json
 
 Every input goes through the same two steps:
 
@@ -22,6 +25,9 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
+import threading
+from pathlib import Path
 from typing import Any
 
 from .ir import Segment, Transcript, Word
@@ -194,3 +200,53 @@ def parse_transcript(webinar_id: str, raw: str | bytes, duration: float | None =
         data["webinar_id"] = webinar_id
         return Transcript.model_validate(data)
     return build_transcript(webinar_id, _utterances_from_json(data), duration)
+
+
+# ---------------------------------------------------------------- local speech-to-text
+
+_models: dict[str, Any] = {}
+_models_lock = threading.Lock()
+
+
+def transcribe_media(webinar_id: str, recording: Path, duration: float | None, model_name: str = "small") -> Transcript:
+    """Speech-to-text for a recording that has no MeetStream transcript.
+
+    Runs faster-whisper locally (no API key): the "small" model takes roughly 3 minutes per
+    hour of audio on a laptop CPU, and is downloaded once on first use. Audio is decoded with
+    FFmpeg, which the app needs anyway. There is no speaker diarisation, so every line is
+    attributed to "Speaker"; MeetStream's own transcripts carry real speaker names.
+    """
+    try:
+        from faster_whisper import WhisperModel
+    except ImportError as e:  # it's a declared dependency; this only happens in a broken install
+        raise TranscriptError("Local transcription needs faster-whisper: `uv pip install faster-whisper`.") from e
+    import numpy as np
+
+    pcm = subprocess.run(["ffmpeg", "-v", "error", "-i", str(recording), "-vn", "-ac", "1", "-ar", "16000", "-f", "s16le", "-"],
+                         capture_output=True)
+    if pcm.returncode != 0:
+        raise TranscriptError(f"Couldn't read the audio for transcription: {pcm.stderr.decode(errors='replace')[-300:]}")
+    audio = np.frombuffer(pcm.stdout, np.int16).astype(np.float32) / 32768.0
+    with _models_lock:  # load each model once per process; loading takes seconds
+        if model_name not in _models:
+            _models[model_name] = WhisperModel(model_name, device="auto", compute_type="int8")
+        model = _models[model_name]
+    raw_segments, _info = model.transcribe(audio, word_timestamps=True, vad_filter=True)
+    # Whisper's segments are ~30 s decoding windows that often end mid-sentence. Join all words
+    # into one stream so sentences are split at their punctuation (see _split_with_words).
+    words: list[Word] = []
+    for seg in raw_segments:
+        for w in seg.words or []:
+            if not w.word.strip():
+                continue
+            if words and not w.word.startswith(" "):
+                # Whisper starts each new word with a space; a piece without one ("-powered") continues the last word.
+                last = words[-1]
+                words[-1] = Word(text=last.text + w.word.strip(), start=last.start, end=w.end,
+                                 confidence=min(last.confidence or 1.0, round(w.probability, 3)))
+            else:
+                words.append(Word(text=w.word.strip(), start=w.start, end=w.end, confidence=round(w.probability, 3)))
+    if not words:
+        raise TranscriptError("No speech was found in the recording.")
+    text = " ".join(w.text for w in words)
+    return build_transcript(webinar_id, [_Utterance("Speaker", text, words[0].start, words[-1].end, words)], duration)

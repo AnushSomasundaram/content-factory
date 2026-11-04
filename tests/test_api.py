@@ -4,6 +4,9 @@ import io
 import json
 import time
 import zipfile
+from datetime import datetime, timedelta, timezone
+
+from pathlib import Path
 
 import httpx
 import pytest
@@ -12,6 +15,7 @@ from fastapi.testclient import TestClient
 from contentfactory.api import create_app
 from contentfactory.config import Settings
 from contentfactory.db import Store
+from contentfactory.ingest import parse_transcript
 from contentfactory.meetstream import MeetStreamClient
 from contentfactory.pipeline import ContentFactory
 
@@ -26,14 +30,17 @@ def fake_meetstream(video_bytes: bytes, calls: list):
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(request.url.path)
         path = request.url.path
-        if request.url.host == "ms-s3-bucket.s3.amazonaws.com":
+        if request.url.host.endswith(".s3.amazonaws.com"):
             assert "authorization" not in request.headers  # presigned URLs carry their own auth
+            if request.headers.get("range") == "bytes=0-0":  # the up-front link check
+                return httpx.Response(206, content=video_bytes[:1], headers={
+                    "content-type": "video/mp4", "content-range": f"bytes 0-0/{len(video_bytes)}"})
             return httpx.Response(200, content=video_bytes)
         assert request.headers["authorization"] == "Token ms_key"
         if path in ("/api/v1/bots/bot_42/detail", f"/api/v1/bots/{OTHER_BOT}/detail"):
             bot_id = path.split("/")[-2]
             return httpx.Response(200, json={"bot_details": {"BotID": bot_id, "Platform": "Zoom", "CreatedAt": "2026-10-21T15:00:00Z"}})
-        if path == "/api/v1/bots/bot_42/get_transcript":
+        if path in ("/api/v1/bots/bot_42/get_transcript", f"/api/v1/bots/{OTHER_BOT}/get_transcript"):
             return httpx.Response(200, json=make_meetstream_transcript())
         if path == "/api/v1/bots/bot_42/get_video":
             return httpx.Response(200, json={"video_url": "https://ms-s3-bucket.s3.amazonaws.com/rec.mp4", "video_info": {}})
@@ -48,13 +55,22 @@ def fake_meetstream(video_bytes: bytes, calls: list):
     return httpx.MockTransport(handler)
 
 
+def fake_transcriber(calls: list):
+    """Stands in for local speech-to-text (faster-whisper) so tests don't download a model."""
+    def transcribe(webinar_id, path, duration):
+        calls.append(f"transcribe:{Path(path).name}")
+        return parse_transcript(webinar_id, json.dumps(make_meetstream_transcript()), duration)
+    return transcribe
+
+
 @pytest.fixture
 def env(tmp_path, tiny_video):
     calls: list[str] = []
     settings = Settings(data_dir=tmp_path, llm_mode="offline", meetstream_api_key="ms_key", job_workers=1)
     transport = fake_meetstream(tiny_video.read_bytes(), calls)
     factory = ContentFactory(settings, Store(settings.db_path),
-                             meetstream_factory=lambda: MeetStreamClient("ms_key", transport=transport))
+                             meetstream_factory=lambda: MeetStreamClient("ms_key", transport=transport),
+                             transcriber=fake_transcriber(calls), url_transport=transport)
     with TestClient(create_app(settings, factory)) as client:
         yield client, calls
 
@@ -216,8 +232,57 @@ def test_meetstream_recording_without_audio_fails_clearly(tmp_path):
         r = client.post(f"{P}/jobs", json={"source": {"type": "meetstream_recording", "recording_id": "bot_42"}})
         job = wait(client, r.json()["job_id"])
         assert job["status"] == "failed" and "no audio" in job["error_message"]
-        # Uploads are gone: MeetStream is the only source of recordings and transcripts.
-        assert client.post(f"{P}/uploads").status_code in (404, 405)
+
+
+def s3_link(bot_id: str, signed: datetime) -> str:
+    return (f"https://ms-s3-bucket-meetstream-prd-main-1.s3.amazonaws.com/{bot_id}/meeting_recording.mp4"
+            f"?X-Amz-Date={signed:%Y%m%dT%H%M%SZ}&X-Amz-Expires=3600&X-Amz-Signature=abc")
+
+
+def test_job_from_a_meetstream_download_link(env):
+    client, calls = env
+    link = s3_link(OTHER_BOT, datetime.now(timezone.utc) - timedelta(minutes=5))
+    r = client.get("/api/v1/meetstream/resolve", params={"link": link}).json()
+    # The link names its bot, so MeetStream's speaker-labelled transcript is used instead of transcribing.
+    assert (r["resolved_from"], r["bot_id"], r["transcript"]) == ("recording_url", OTHER_BOT, "meetstream")
+    assert r["expires_at"] and r["size"] > 0
+
+    r = client.post(f"{P}/jobs", json={"source": {"type": "meetstream_recording", "link": link}, "configuration": CONFIG})
+    assert r.status_code == 202 and r.json()["source"]["type"] == "recording_url"
+    job = wait(client, r.json()["job_id"])
+    assert job["status"] == "awaiting_review", job["error_message"]
+    assert job["webinar"]["source_type"] == "recording_url" and job["webinar"]["title"] == "Meeting recording"
+    assert f"/api/v1/bots/{OTHER_BOT}/get_transcript" in calls and not any(c.startswith("transcribe:") for c in calls)
+
+    # An expired link is refused before anything starts.
+    old = s3_link(OTHER_BOT, datetime.now(timezone.utc) - timedelta(hours=2))
+    r = client.post(f"{P}/jobs", json={"source": {"type": "meetstream_recording", "link": old}})
+    assert r.status_code == 422 and "expired" in r.json()["detail"]
+
+
+def test_dropped_in_recording_is_transcribed_and_processed(env, tiny_video):
+    client, calls = env
+    r = client.post(f"{P}/uploads", data={"title": "", "configuration": json.dumps(CONFIG)},
+                    files={"recording": ("q4-launch_webinar.mp4", tiny_video.read_bytes(), "video/mp4")})
+    assert r.status_code == 202, r.text
+    job = wait(client, r.json()["job_id"])
+    assert job["status"] == "awaiting_review", job["error_message"]
+    assert job["webinar"]["source_type"] == "upload" and job["webinar"]["title"] == "Q4 launch webinar"
+    assert "transcribe:recording.mp4" in calls
+    assert len([a for a in client.get(f"{P}/jobs/{job['job_id']}/assets").json() if a["asset_type"] == "clip"]) >= 1
+    bad = client.post(f"{P}/uploads", files={"recording": ("notes.pdf", b"%PDF", "application/pdf")})
+    assert bad.status_code == 415
+
+
+def test_without_meetstream_recording_links_still_work(tmp_path, tiny_video):
+    settings = Settings(data_dir=tmp_path, llm_mode="offline", meetstream_api_key=None, job_workers=1)
+    transport = fake_meetstream(tiny_video.read_bytes(), [])
+    factory = ContentFactory(settings, Store(settings.db_path), transcriber=fake_transcriber([]), url_transport=transport)
+    with TestClient(create_app(settings, factory)) as client:
+        r = client.get("/api/v1/meetstream/resolve", params={"link": "https://zoom.us/j/8812345678"})
+        assert r.status_code == 422 and "MeetStream isn't connected" in r.json()["detail"]
+        link = s3_link(OTHER_BOT, datetime.now(timezone.utc))
+        assert client.get("/api/v1/meetstream/resolve", params={"link": link}).json()["transcript"] == "local"
 
 
 def test_api_token_is_required_when_configured(tmp_path, monkeypatch):
@@ -228,3 +293,53 @@ def test_api_token_is_required_when_configured(tmp_path, monkeypatch):
         assert client.get(f"{P}/jobs").status_code == 401
         assert client.get(f"{P}/jobs", headers={"Authorization": "Bearer s3cret"}).status_code == 200
         assert client.get(f"{P}/jobs?access_token=s3cret").status_code == 200
+
+
+def test_keys_can_be_set_from_the_dashboard(tmp_path, monkeypatch):
+    from fastapi import HTTPException
+
+    import contentfactory.api as api_module
+    from contentfactory.generators import OpenAIGenerator
+
+    for var in ("OPENAI_API_KEY", "CF_LLM", "MEETSTREAM_API_KEY", "CF_MODEL"):
+        monkeypatch.delenv(var, raising=False)
+    checked = []
+
+    def check_openai(key, model):
+        checked.append((key, model))
+        if key != "sk-good-key-1234":
+            raise HTTPException(422, "OpenAI didn't accept that key.")
+
+    monkeypatch.setattr(api_module, "check_openai_key", check_openai)
+    monkeypatch.setattr(api_module, "check_meetstream_key", lambda key, base: None)
+    settings = Settings(data_dir=tmp_path)
+    factory = ContentFactory(settings, Store(settings.db_path))
+    with TestClient(create_app(settings, factory)) as client:
+        s = client.get("/api/v1/settings").json()
+        assert s["openai_api_key"]["set"] is False and s["llm_mode"] == "offline"
+
+        # A key OpenAI rejects is not saved.
+        r = client.post("/api/v1/settings", json={"openai_api_key": "sk-typo"})
+        assert r.status_code == 422 and "didn't accept" in r.json()["detail"]
+        assert not settings.secrets_path.exists()
+
+        r = client.post("/api/v1/settings", json={"openai_api_key": "sk-good-key-1234", "meetstream_api_key": "ms_abcdefgh5678"})
+        assert r.status_code == 200
+        body = r.json()
+        assert "sk-good-key-1234" not in r.text and body["openai_api_key"] == {"set": True, "source": "saved", "hint": "…1234"}
+        assert body["meetstream_api_key"]["hint"] == "…5678"
+        assert client.get("/api/v1/health").json()["llm_mode"] == "openai"
+        assert oct(settings.secrets_path.stat().st_mode & 0o777) == "0o600"
+        # The next job uses the new key.
+        gen = factory.generator
+        assert isinstance(gen, OpenAIGenerator) and gen.client.api_key == "sk-good-key-1234"
+
+        # Changing only the model re-checks the saved key against it.
+        client.post("/api/v1/settings", json={"openai_model": "gpt-6.1-sol"})
+        assert checked[-1] == ("sk-good-key-1234", "gpt-6.1-sol") and factory.generator.model == "gpt-6.1-sol"
+
+        # Removing the key goes back to offline, and survives a restart.
+        assert client.post("/api/v1/settings", json={"openai_api_key": ""}).json()["llm_mode"] == "offline"
+    restarted = Settings(data_dir=tmp_path)
+    restarted.apply_saved()
+    assert restarted.openai_api_key is None and restarted.model == "gpt-6.1-sol" and restarted.meetstream_api_key == "ms_abcdefgh5678"

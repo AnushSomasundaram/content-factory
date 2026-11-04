@@ -23,9 +23,10 @@ from __future__ import annotations
 import re
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 import httpx
 
@@ -131,23 +132,28 @@ class MeetStreamClient:
         return self._get(f"/bots/{bot_id}/get_audio")
 
     def download(self, url: str, dest: Path) -> Path:
-        """Stream a presigned S3 URL to disk.
+        """Stream a presigned S3 URL to disk (see `download_url`)."""
+        return download_url(url, dest, self._transport)
 
-        No auth header is sent: the URL carries its own signature, and sending our API key to
-        S3 would leak it. Writes to `<dest>.part` first so a failed download never leaves a
-        truncated file at `dest`.
-        """
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        tmp = dest.with_suffix(dest.suffix + ".part")
-        with httpx.Client(transport=self._transport, timeout=httpx.Timeout(30.0, read=300.0), follow_redirects=True) as c:
-            with c.stream("GET", url) as r:
-                if r.status_code >= 400:
-                    raise MeetStreamError(f"Download failed: HTTP {r.status_code} (presigned links expire after ~1 hour)")
-                with tmp.open("wb") as f:
-                    for chunk in r.iter_bytes(1 << 20):
-                        f.write(chunk)
-        tmp.replace(dest)
-        return dest
+
+def download_url(url: str, dest: Path, transport: httpx.BaseTransport | None = None) -> Path:
+    """Stream a recording URL (e.g. a presigned S3 link) to disk.
+
+    No auth header is sent: a presigned URL carries its own signature, and sending our API key
+    to S3 would leak it. Writes to `<dest>.part` first so a failed download never leaves a
+    truncated file at `dest`.
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    with httpx.Client(transport=transport, timeout=httpx.Timeout(30.0, read=300.0), follow_redirects=True) as c:
+        with c.stream("GET", url) as r:
+            if r.status_code >= 400:
+                raise MeetStreamError(f"Download failed: HTTP {r.status_code} (presigned links expire after ~1 hour)", r.status_code)
+            with tmp.open("wb") as f:
+                for chunk in r.iter_bytes(1 << 20):
+                    f.write(chunk)
+    tmp.replace(dest)
+    return dest
 
 
 def with_retry_when_processing(fn, *args, attempts: int = 10, wait_seconds: float = 15.0):
@@ -168,10 +174,12 @@ def with_retry_when_processing(fn, *args, attempts: int = 10, wait_seconds: floa
 
 # ---------------------------------------------------------------- resolving links to recordings
 #
-# People paste whatever link they have. We accept three kinds of reference:
+# People paste whatever link they have. We accept four kinds of reference:
 #   1. a bare bot id                      "0c0f8353-ad37-43af-ac53-322f23d44743"
 #   2. any MeetStream URL containing one  "https://app.meetstream.ai/.../0c0f8353-ad37-..."
 #   3. the meeting link itself            "https://zoom.us/j/123?pwd=..." / Meet / Teams
+#   4. a direct link to the recording     MeetStream's S3 download link, or any .mp4/.mp3/... URL
+# (4) is downloaded as is and needs no MeetStream key (see check_recording_url).
 # (1) and (2) name the recording directly; we still check it with Get Bot Details. (3) is resolved by finding the bot MeetStream sent
 # to that meeting, via List Bots, whose entries carry the meeting link.
 
@@ -232,6 +240,8 @@ def classify_reference(ref: str) -> tuple[str, str]:
         raise RecordingLookupError("Paste a MeetStream link, a meeting link, or a bot id.")
     if "://" not in ref and " " not in ref and "/" not in ref:
         return "bot_id", ref
+    if is_recording_url(ref):
+        return "recording_url", ref
     host = (urlsplit(ref).hostname or "").lower()
     if host == "meetstream.ai" or host.endswith(".meetstream.ai"):
         m = _UUID.search(ref)
@@ -241,7 +251,69 @@ def classify_reference(ref: str) -> tuple[str, str]:
         return "meetstream_url", m.group(0)
     if normalize_meeting_link(ref):
         return "meeting_link", ref
-    raise RecordingLookupError("Not a MeetStream link, a Zoom / Google Meet / Teams meeting link, or a bot id.")
+    raise RecordingLookupError("Not a MeetStream link, a Zoom / Google Meet / Teams meeting link, a link to a recording "
+                               "file, or a bot id.")
+
+
+MEDIA_EXTENSIONS = (".mp4", ".mov", ".webm", ".mkv", ".m4a", ".mp3", ".wav")
+# MeetStream's recording download links: https://ms-s3-bucket-meetstream-…s3.amazonaws.com/<bot id>/meeting_recording.mp4?X-Amz-…
+_MEETSTREAM_S3 = re.compile(r"^ms-s3-bucket-meetstream[\w-]*\.s3[\w.-]*\.amazonaws\.com$")
+
+
+def is_recording_url(ref: str) -> bool:
+    """Whether `ref` is a direct http(s) link to a media file (by path extension or MeetStream's bucket)."""
+    u = urlsplit(ref.strip())
+    if u.scheme not in ("http", "https") or not u.hostname:
+        return False
+    return bool(_MEETSTREAM_S3.match(u.hostname.lower())) or u.path.lower().endswith(MEDIA_EXTENSIONS)
+
+
+def meetstream_bot_in_url(url: str) -> str | None:
+    """The bot id in a MeetStream S3 recording link (its first path segment), else None."""
+    u = urlsplit(url)
+    if not _MEETSTREAM_S3.match((u.hostname or "").lower()):
+        return None
+    m = _UUID.search(u.path)
+    return m.group(0) if m else None
+
+
+def link_expires_at(url: str) -> datetime | None:
+    """When a presigned S3 link stops working (X-Amz-Date + X-Amz-Expires), or None if it doesn't say."""
+    q = {k.lower(): v[0] for k, v in parse_qs(urlsplit(url).query).items()}
+    try:
+        signed = datetime.strptime(q["x-amz-date"], "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+        return datetime.fromtimestamp(signed.timestamp() + int(q["x-amz-expires"]), timezone.utc)
+    except (KeyError, ValueError):
+        return None
+
+
+def check_recording_url(url: str, transport: httpx.BaseTransport | None = None) -> dict:
+    """Confirm a recording link can be downloaded right now, before a job is created.
+
+    Requests the first byte only. (A presigned GET URL can't be HEAD-requested: the signature
+    covers the method.) Returns `{"bot_id", "expires_at", "size"}`; raises RecordingLookupError
+    with the reason if the link has expired or doesn't point at a file.
+    """
+    expires = link_expires_at(url)
+    if expires and expires <= datetime.now(timezone.utc):
+        raise RecordingLookupError("That recording link has expired (MeetStream's download links last about an hour). "
+                                   "Copy a fresh one from MeetStream, or download the file and drop it in.")
+    try:
+        with httpx.Client(transport=transport, timeout=20.0, follow_redirects=True) as c:
+            r = c.get(url, headers={"Range": "bytes=0-0"})
+    except httpx.HTTPError as e:
+        raise RecordingLookupError(f"Couldn't reach that recording link ({e.__class__.__name__}).") from e
+    if r.status_code in (401, 403):
+        raise RecordingLookupError("That recording link was refused. If it's a MeetStream download link it has probably "
+                                   "expired: copy a fresh one, or download the file and drop it in.")
+    if r.status_code >= 400:
+        raise RecordingLookupError(f"That recording link didn't work (HTTP {r.status_code}).")
+    ctype = r.headers.get("content-type", "")
+    if ctype.startswith("text/html"):
+        raise RecordingLookupError("That link opens a web page, not a recording file. Use the file's download link.")
+    total = r.headers.get("content-range", "").rpartition("/")[2]
+    return {"bot_id": meetstream_bot_in_url(url), "expires_at": expires.isoformat() if expires else None,
+            "size": int(total) if total.isdigit() else None}
 
 
 def _status(bot: dict) -> str:

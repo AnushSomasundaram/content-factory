@@ -13,6 +13,9 @@ Paste any of these into the dashboard's link box, the API's `source.link`, or th
 | A bot id | `0c0f8353-ad37-43af-ac53-322f23d44743` | Checked with `GET /bots/{id}/detail`, then used |
 | A MeetStream link | `https://app.meetstream.ai/…/0c0f8353-ad37-…` (dashboard, API or any `*.meetstream.ai` URL) | The bot id is taken from the URL, then checked the same way |
 | The meeting's own link | `https://zoom.us/j/8812345678?pwd=…`, `https://meet.google.com/abc-defg-hij`, a Teams join link | The app finds the bot MeetStream sent to that meeting and uses its recording |
+| MeetStream's download link for the recording | `https://ms-s3-bucket-meetstream-….s3.amazonaws.com/<bot id>/meeting_recording.mp4?X-Amz-…` | Downloaded directly; **works without a MeetStream key**. With a key, the bot's transcript is used; without one, it's transcribed locally. These links expire after about an hour, and an expired one is refused with that reason. |
+
+The first three need `MEETSTREAM_API_KEY`. You can also drop a recording file into the dashboard, which needs no MeetStream at all.
 
 **How meeting links are matched.** The app reads your bots (`GET /bots`, following pages) and compares each bot's `meeting_link` with yours. MeetStream documents List Bots entries only loosely. So for any bot listed without a meeting link, the app reads it from `GET /bots/{id}/detail` (`MeetingLink`), newest bots first, for up to 50 bots. The comparison ignores the differences between copies of the same invite:
 

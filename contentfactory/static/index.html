@@ -29,6 +29,13 @@ h1, h2, h3, h4 { margin: 0; line-height: 1.3; }
 .sp { flex: 1; }
 .mode { font-size: 12px; padding: 3px 10px; border-radius: 99px; background: var(--accent-soft); color: var(--accent); cursor: help; }
 .mode.off { background: var(--warn-bg); color: var(--warn); }
+.mode { border: 0; font: inherit; font-size: 12px; cursor: pointer; }
+.keystate { font-size: 12px; margin-left: 6px; }
+.keystate.ok { color: var(--ok); } .keystate.none { color: var(--warn); }
+.formmsg { margin-top: 12px; font-size: 14px; }
+.formmsg.err { color: var(--err); background: var(--err-bg); padding: 8px 12px; border-radius: 8px; }
+.formmsg.ok { color: var(--ok); }
+.hint { font-size: 12px; color: var(--muted); margin-top: 4px; }
 .muted { color: var(--muted); } .small { font-size: 13px; }
 
 /* controls */
@@ -60,6 +67,11 @@ button.lg { padding: 12px 22px; font-size: 16px; }
 .lookup { margin-top: 10px; min-height: 24px; font-size: 14px; }
 .lookup .found { display: inline-flex; gap: 8px; align-items: center; color: var(--ok); }
 .lookup .problem { color: var(--warn); background: var(--warn-bg); padding: 8px 12px; border-radius: 8px; }
+.drop { margin-top: 18px; border: 2px dashed var(--line); border-radius: 12px; padding: 22px; text-align: center; color: var(--muted); cursor: pointer; transition: border-color .15s, background .15s; }
+.drop:hover, .drop.over { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+.drop b { color: var(--ink); }
+.or { text-align: center; color: var(--faint); font-size: 13px; margin: 14px 0 0; }
+.notice { background: var(--accent-soft); color: var(--accent); border-radius: 10px; padding: 10px 14px; margin-top: 12px; font-size: 14px; }
 .under { display: flex; gap: 18px; flex-wrap: wrap; margin-top: 8px; font-size: 14px; }
 .box { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin-top: 14px; box-shadow: var(--shadow); }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; }
@@ -175,7 +187,8 @@ dialog .row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 18
 <div class="topbar">
   <a class="brand" href="#">Content Factory <span>· MeetStream</span></a>
   <span class="sp"></span>
-  <span id="mode" class="mode"></span>
+  <button id="mode" class="mode" title="Settings"></button>
+  <button id="openSettings">Settings</button>
 </div>
 <main id="app"></main>
 
@@ -187,6 +200,25 @@ dialog .row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 18
     <label for="consentNote">Note (optional)</label>
     <input id="consentNote" placeholder="e.g. Consent collected in the speaker agreement">
     <div class="row"><button value="cancel">Cancel</button><button value="ok" id="consentGo" class="primary" disabled>Confirm and download</button></div>
+  </form>
+</dialog>
+
+<dialog id="settings">
+  <form method="dialog">
+    <h3>Settings</h3>
+    <p class="muted small">Each key is checked with OpenAI or MeetStream before it's saved. They're kept on this server, in <code>data/secrets.json</code>, and never shown again in full.</p>
+    <label for="oaKey">OpenAI API key <span class="keystate" id="oaState"></span></label>
+    <input id="oaKey" type="password" autocomplete="off" spellcheck="false" placeholder="sk-…">
+    <div class="hint">Picks the best moments and writes the content. Without it, drafts are just the speakers' sentences rearranged. Get one at <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener">platform.openai.com/api-keys</a>.</div>
+    <label for="oaModel">OpenAI model</label>
+    <input id="oaModel" list="models" autocomplete="off">
+    <datalist id="models"><option value="gpt-6-astra"><option value="gpt-6.1-sol"><option value="gpt-6.1-terra"><option value="gpt-6-luna"></datalist>
+    <div class="hint">gpt-6-astra writes best; gpt-6.1-sol is cheaper.</div>
+    <label for="msKey">MeetStream API key <span class="keystate" id="msState"></span></label>
+    <input id="msKey" type="password" autocomplete="off" spellcheck="false" placeholder="ms_…">
+    <div class="hint">Optional. Lets you paste meeting links and bot ids, and uses MeetStream's transcripts with speaker names. Get one at <a href="https://app.meetstream.ai/api-key" target="_blank" rel="noopener">app.meetstream.ai/api-key</a>.</div>
+    <div class="formmsg" id="settingsMsg"></div>
+    <div class="row"><button value="cancel">Close</button><button type="button" id="settingsSave" class="primary">Save</button></div>
   </form>
 </dialog>
 
@@ -264,14 +296,18 @@ function renderHome() {
   $("#app").innerHTML = `<div class="home">
     <div class="hero">
       <h1>Turn a meeting into content</h1>
-      <p>Paste the link of a meeting MeetStream recorded. You'll get clips, a blog post, LinkedIn posts and quotes to review. Nothing gets published.</p>
+      <p>Paste a link to a recording, or drop the file in. You'll get clips, a blog post, LinkedIn posts and quotes to review. Nothing gets published.</p>
       <div class="paste">
-        <input id="link" autocomplete="off" placeholder="https://zoom.us/j/…, a Google Meet or Teams link, or a MeetStream link" ${msOff ? "disabled" : ""}>
-        <button id="go" class="primary lg" ${msOff ? "disabled" : ""}>Create content</button>
+        <input id="link" autocomplete="off" placeholder="A MeetStream recording link, a Zoom / Meet / Teams link, or any .mp4 link">
+        <button id="go" class="primary lg">Create content</button>
       </div>
-      <div class="lookup" id="lookup">${msOff ? `<div class="problem">MeetStream isn't connected: set <code>MEETSTREAM_API_KEY</code> on the server and restart it.</div>` : ""}</div>
+      <div class="lookup" id="lookup"></div>
+      <div class="or">or</div>
+      <div class="drop" id="drop" tabindex="0"><b>Drop a recording here</b> or click to choose a file<div class="small">MP4, MOV, WebM, MKV, MP3, WAV or M4A · it's transcribed automatically</div>
+        <input type="file" id="file" hidden accept=".mp4,.mov,.webm,.mkv,.mp3,.wav,.m4a,video/*,audio/*"></div>
       <div class="under">
-        <button class="link" id="browse" ${msOff ? "disabled" : ""}>Pick from your recent recordings</button>
+        ${msOff ? `<span class="muted">MeetStream isn't connected, so meeting links and bot ids won't work (files and recording links will). <button class="link" data-settings>Add a MeetStream key</button></span>`
+          : `<button class="link" id="browse">Pick from your recent MeetStream recordings</button>`}
         <button class="link" id="optToggle">Options</button>
       </div>
       <div id="recs" class="box" hidden></div>
@@ -296,7 +332,16 @@ function renderHome() {
   $("#link").addEventListener("keydown", e => { if (e.key === "Enter") create(); });
   $("#go").onclick = create;
   $("#optToggle").onclick = () => { $("#options").hidden = !$("#options").hidden; };
-  $("#browse").onclick = browse;
+  $("#browse")?.addEventListener("click", browse);
+  const drop = $("#drop"), file = $("#file");
+  drop.onclick = () => file.click();
+  drop.onkeydown = e => { if (e.key === "Enter" || e.key === " ") file.click(); };
+  file.onchange = () => file.files[0] && upload(file.files[0]);
+  ["dragenter", "dragover"].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("over"); }));
+  ["dragleave", "drop"].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove("over"); }));
+  drop.addEventListener("drop", e => { const f = e.dataTransfer.files[0]; if (f) upload(f); });
+  // Files dropped anywhere else on the page would make the browser navigate away to play them.
+  ["dragover", "drop"].forEach(ev => window.addEventListener(ev, e => e.preventDefault()));
 
   // Show which recording the pasted link points at, before anything is created.
   async function lookup() {
@@ -306,7 +351,13 @@ function renderHome() {
     try {
       const r = await api("/api/v1/meetstream/resolve?link=" + encodeURIComponent(link));
       if (mine !== seq) return;
-      const b = r.bot, more = (r.other_matches || []).length;
+      const b = r.bot || {}, more = (r.other_matches || []).length;
+      if (r.resolved_from === "recording_url") {
+        const mins = r.expires_at ? Math.floor((new Date(r.expires_at) - Date.now()) / 60000) : null;
+        box.innerHTML = `<span class="found">✓ The recording link works${r.size ? ` (${(r.size / 1e6).toFixed(1)} MB)` : ""}</span>
+          <span class="muted">· ${r.transcript === "meetstream" ? "MeetStream's transcript will be used" : "it'll be transcribed automatically"}${mins !== null ? ` · link expires in ${mins} min, so start soon` : ""}</span>`;
+        return;
+      }
       box.innerHTML = r.resolved_from === "meeting_link"
         ? `<span class="found">✓ Found the recording: ${esc(b.platform || "Meeting")} · ${esc(when(b.created_at))}${more ? ` <span class="muted">(the latest of ${more + 1} recordings of this meeting)</span>` : ""}</span>`
         : `<span class="found">✓ Found the recording: ${esc(b.platform || "MeetStream")}${b.created_at ? " · " + esc(when(b.created_at)) : ""}</span>`;
@@ -327,15 +378,35 @@ function renderHome() {
     } catch (e) { box.innerHTML = `<div class="problem">${esc(e.message)}</div>`; }
   }
 
+  const configuration = () => ({ audience: $("#audience").value, tone: $("#tone").value, clip_count: +$("#clipCount").value,
+    blog_word_count: +$("#blogWords").value, burn_captions: $("#burn").checked,
+    clip_formats: $("#portrait").checked ? ["landscape", "portrait"] : ["landscape"] });
+
+  // Send a dropped file with a progress bar (fetch() can't report upload progress).
+  function upload(f) {
+    const drop = $("#drop");
+    drop.innerHTML = `<b>Uploading ${esc(f.name)}…</b><div class="bar"><div style="width:0%"></div></div>`;
+    const fd = new FormData();
+    fd.append("recording", f); fd.append("title", $("#title").value.trim()); fd.append("configuration", JSON.stringify(configuration()));
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", P + "/uploads");
+    if (token) xhr.setRequestHeader("Authorization", "Bearer " + token);
+    xhr.upload.onprogress = e => { if (e.lengthComputable) $(".bar > div", drop).style.width = (100 * e.loaded / e.total) + "%"; };
+    xhr.onload = () => {
+      let body = {}; try { body = JSON.parse(xhr.responseText); } catch {}
+      if (xhr.status < 300) { location.hash = "job=" + body.job_id; return; }
+      toast(typeof body.detail === "string" ? body.detail : "Upload failed (HTTP " + xhr.status + ")"); renderHome();
+    };
+    xhr.onerror = () => { toast("Upload failed: the server couldn't be reached."); renderHome(); };
+    xhr.send(fd);
+  }
+
   async function create() {
     const link = $("#link").value.trim();
-    if (!link) { toast("Paste a meeting link first."); $("#link").focus(); return; }
+    if (!link) { toast("Paste a link first, or drop a recording in."); $("#link").focus(); return; }
     const btn = $("#go"); btn.disabled = true; btn.textContent = "Starting…";
     try {
-      const configuration = { audience: $("#audience").value, tone: $("#tone").value, clip_count: +$("#clipCount").value,
-        blog_word_count: +$("#blogWords").value, burn_captions: $("#burn").checked,
-        clip_formats: $("#portrait").checked ? ["landscape", "portrait"] : ["landscape"] };
-      const job = await api(P + "/jobs", { method: "POST", json: { source: { type: "meetstream_recording", link, title: $("#title").value.trim() || null }, configuration } });
+      const job = await api(P + "/jobs", { method: "POST", json: { source: { type: "meetstream_recording", link, title: $("#title").value.trim() || null }, configuration: configuration() } });
       location.hash = "job=" + job.job_id;
     } catch (e) { $("#lookup").innerHTML = `<div class="problem">${esc(e.message)}</div>`; btn.disabled = false; btn.textContent = "Create content"; }
   }
@@ -357,7 +428,7 @@ async function loadJobs() {
       pct = j.assets ? Math.round(100 * (j.assets - j.to_review) / j.assets) : 100; cls = "ok"; }
     return `<a class="pkg" href="#job=${esc(j.job_id)}"><b>${esc(j.title || "Untitled")}</b><span class="small muted">${esc(when(j.created_at))}</span>
       <div class="state">${line}</div><div class="bar ${cls}"><div style="width:${pct}%"></div></div></a>`;
-  }).join("") || `<div class="empty" style="grid-column:1/-1">Nothing yet. Paste a meeting link above to make your first content package.</div>`;
+  }).join("") || `<div class="empty" style="grid-column:1/-1">Nothing yet. Paste a link or drop a recording above to make your first content package.</div>`;
   if (jobs.some(j => j.status === "queued" || j.status === "processing")) state.poll = setTimeout(loadJobs, 2500);
 }
 
@@ -394,6 +465,9 @@ const jobSub = j => [j.webinar && j.webinar.duration_seconds ? clock(j.webinar.d
 function renderMaking() {
   const j = state.job, failed = j.status === "failed";
   const order = Object.keys(STEPS);
+  const ingestLabel = j.source.type === "meetstream_recording" ? STEPS.ingest
+    : j.source.type === "upload" ? "Transcribing the recording (about 3 minutes per hour of video)"
+    : "Downloading the recording and getting a transcript";
   $("#app").innerHTML = `<div class="page"><a class="back" href="#">← All content</a>
     <div class="making"><div class="jobhead"><h1>${esc(jobTitle(j))}</h1><div class="muted small">${esc(jobSub(j))}</div></div>
       <div class="box">
@@ -402,7 +476,7 @@ function renderMaking() {
         <div class="bar"><div style="width:${failed ? 0 : j.progress}%"></div></div>
         <ul class="steps">${order.map(s => {
           const cls = j.completed.includes(s) ? "done" : failed && s === j.current_stage ? "failed" : s === j.current_stage ? "now" : "";
-          return `<li class="${cls}"><span class="dot">${cls === "done" ? "✓" : cls === "failed" ? "!" : ""}</span>${esc(STEPS[s])}</li>`;
+          return `<li class="${cls}"><span class="dot">${cls === "done" ? "✓" : cls === "failed" ? "!" : ""}</span>${esc(s === "ingest" ? ingestLabel : STEPS[s])}</li>`;
         }).join("")}</ul>
         ${failed ? `<div class="error">${esc(j.error_message || "Unknown error")}</div>
           <div style="margin-top:12px; display:flex; gap:10px; align-items:center"><button class="primary" id="retry">Try again</button>
@@ -422,6 +496,7 @@ function buildReview() {
   $("#app").innerHTML = `<div class="page"><a class="back" href="#">← All content</a>
     <div class="jobhead"><h1>${esc(jobTitle(j))}</h1><div class="muted small">${esc(jobSub(j))}</div></div>
     <div class="finish" id="finish"></div>
+    ${offline() ? `<div class="notice"><b>AI writing is off</b>, so these drafts are the speakers' own sentences rearranged by simple rules. <button class="link" data-settings>Add your OpenAI key</button>, then make the package again for properly written posts, blog and clip picks.</div>` : ""}
     ${warnings.map(w => `<div class="heads-up"><b>Check before publishing:</b> ${esc(w.message)} ${(w.segment_ids || []).map(tsChip).join("")}</div>`).join("")}
     <div class="review">
       <nav class="nav" id="nav"></nav>
@@ -431,7 +506,7 @@ function buildReview() {
         ${j.webinar.has_video ? `<video id="src" controls preload="metadata" src="${withToken(`${P}/jobs/${j.job_id}/recording`)}"></video>`
           : `<audio id="src" controls preload="metadata" src="${withToken(`${P}/jobs/${j.job_id}/recording`)}"></audio>`}
         <div class="small muted" style="margin-top:6px">Click a line to play from there. The ▶ times on each item jump here too.</div>
-        <div id="transcript">${state.transcript.segments.map(s => `<p data-seg="${s.id}" data-t="${s.start}"><span class="t">${clock(s.start)}</span><b>${esc(s.speaker)}:</b> ${esc(s.text)}</p>`).join("")}</div>
+        <div id="transcript">${state.transcript.segments.map(s => `<p data-seg="${s.id}" data-t="${s.start}"><span class="t">${clock(s.start)}</span>${s.speaker === "Speaker" ? "" : `<b>${esc(s.speaker)}:</b> `}${esc(s.text)}</p>`).join("")}</div>
       </aside>
     </div></div>`;
   $$("#transcript p").forEach(p => p.onclick = () => seek(+p.dataset.t));
@@ -577,7 +652,7 @@ function body(a) {
     case "linkedin_post":
       return `<div class="post">${esc(c.text)}</div><p class="tags">${esc(c.hashtags.join(" "))}</p>${from(c.segment_ids)}`;
     case "quote":
-      return `<div class="quote">“${esc(c.quote)}”</div><p class="small">— ${esc(c.speaker || "Speaker unknown")}</p>${from(c.segment_ids)}`;
+      return `<div class="quote">“${esc(c.quote)}”</div><p class="small">— ${esc(c.speaker && c.speaker !== "Speaker" ? c.speaker : "Speaker (name not in the transcript)")}</p>${from(c.segment_ids)}`;
     case "takeaway":
       return `<div class="ai-label">${esc(c.label)}</div><div class="quote">${esc(c.text)}</div>${from(c.segment_ids)}`;
     case "visual_brief":
@@ -738,11 +813,57 @@ function seekToSegment(id) {
 async function boot() {
   health = await (await fetch("/api/v1/health")).json();
   if (health.auth_required && !token) { token = prompt("This Content Factory needs an access token:"); try { localStorage.setItem("cfToken", token); } catch {} }
-  const mode = $("#mode");
-  if (offline()) { mode.textContent = "AI writing off"; mode.classList.add("off");
-    mode.title = "No OPENAI_API_KEY on the server, so drafts are assembled from the speakers' own sentences. Set the key and restart for AI-written content."; }
-  else { mode.textContent = "AI: " + health.model; mode.title = "OpenAI picks the clips and writes the drafts."; }
+  renderMode();
+  $("#mode").onclick = $("#openSettings").onclick = openSettings;
+  // Any element with data-settings (notices, hints) opens the panel too.
+  document.addEventListener("click", e => { if (e.target.closest("[data-settings]")) openSettings(); });
   route();
+}
+
+function renderMode() {
+  const mode = $("#mode");
+  mode.classList.toggle("off", offline());
+  mode.textContent = offline() ? "AI writing off · add key" : "AI: " + health.model;
+  mode.title = offline() ? "No OpenAI key yet, so drafts are assembled from the speakers' own sentences. Click to add one."
+    : "OpenAI picks the clips and writes the drafts. Click to change the key or model.";
+}
+
+// ---------------------------------------------------------------- settings
+async function openSettings() {
+  const dlg = $("#settings"), msg = $("#settingsMsg");
+  msg.className = "formmsg"; msg.textContent = "";
+  let cur;
+  try { cur = await api("/api/v1/settings"); } catch (e) { toast(e.message); return; }
+  const state = (k, el) => { const v = cur[k]; el.className = "keystate " + (v.set ? "ok" : "none");
+    el.innerHTML = v.set ? `✓ ${esc(v.hint)} (${v.source === "saved" ? "saved here" : "from the environment"})${v.source === "saved" ? ` · <button type="button" class="link" data-remove="${k}">remove</button>` : ""}` : "not set"; };
+  state("openai_api_key", $("#oaState")); state("meetstream_api_key", $("#msState"));
+  $("#oaKey").value = ""; $("#msKey").value = ""; $("#oaModel").value = cur.openai_model;
+  $("#oaKey").placeholder = cur.openai_api_key.set ? "Paste a new key to replace it" : "sk-…";
+  $("#msKey").placeholder = cur.meetstream_api_key.set ? "Paste a new key to replace it" : "ms_…";
+  $$("[data-remove]", dlg).forEach(b => b.onclick = () => save({ [b.dataset.remove]: "" }));
+  $("#settingsSave").onclick = () => {
+    const body = {};
+    if ($("#oaKey").value.trim()) body.openai_api_key = $("#oaKey").value.trim();
+    if ($("#oaModel").value.trim() && $("#oaModel").value.trim() !== cur.openai_model) body.openai_model = $("#oaModel").value.trim();
+    if ($("#msKey").value.trim()) body.meetstream_api_key = $("#msKey").value.trim();
+    if (!Object.keys(body).length) { dlg.close(); return; }
+    save(body);
+  };
+  async function save(body) {
+    const btn = $("#settingsSave"); btn.disabled = true; btn.textContent = "Checking…";
+    msg.className = "formmsg"; msg.textContent = "";
+    try {
+      await api("/api/v1/settings", { method: "POST", json: body });
+      health = await (await fetch("/api/v1/health")).json();
+      renderMode();
+      await openSettings();
+      msg.className = "formmsg ok";
+      msg.textContent = "✓ Saved. " + (offline() ? "AI writing is off." : `New packages will be written by ${health.model}.`);
+      if (!location.hash.includes("job=")) renderHome();
+    } catch (e) { msg.className = "formmsg err"; msg.textContent = e.message; }
+    finally { btn.disabled = false; btn.textContent = "Save"; }
+  }
+  if (!dlg.open) dlg.showModal();
 }
 function route() { const m = location.hash.match(/job=([\w-]+)/); if (m) openJob(m[1]); else renderHome(); }
 window.addEventListener("hashchange", route);

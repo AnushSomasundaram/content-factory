@@ -1,9 +1,9 @@
 """Job orchestration: ingest -> understand -> generate -> render -> validate -> review queue.
 
-A *job* turns one MeetStream recording (a bot's video or audio plus its transcript) into a set of *assets* waiting
+A *job* turns one recording (a MeetStream bot, a recording link, or a dropped-in file) into a set of *assets* waiting
 for review. It runs in a background thread pool, stage by stage:
 
-    ingest            fetch the recording and transcript from MeetStream, parse the transcript into the IR (ir.py)
+    ingest            get the recording, and MeetStream's transcript or a local one; parse the transcript into the IR (ir.py)
     chapters          boundaries from segmentation.py, names from the generator
     content_brief     the shared story every later asset follows
     clip_selection    generator proposes moments; validate.py snaps, scores and filters them
@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import shutil
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -37,9 +39,9 @@ from .config import Settings
 from .db import Store, now
 from .drafts import BlogDraft, ContentBrief, JobConfig, SocialPost, VisualBrief
 from .generators import Chapter, GenContext, Generator, GenerationError, make_generator
-from .ingest import TranscriptError, parse_transcript
+from .ingest import TranscriptError, parse_transcript, transcribe_media
 from .ir import Transcript, fmt_clock, fmt_hms
-from .meetstream import MeetStreamClient, MeetStreamError, with_retry_when_processing
+from .meetstream import MeetStreamClient, MeetStreamError, download_url, with_retry_when_processing
 from .segmentation import chapter_spans, detect_boundaries
 
 log = logging.getLogger("contentfactory")
@@ -109,13 +111,19 @@ class ContentFactory:
     """
 
     def __init__(self, settings: Settings, store: Store, generator_factory: Callable[[], Generator] | None = None,
-                 meetstream_factory: Callable[[], MeetStreamClient] | None = None):
+                 meetstream_factory: Callable[[], MeetStreamClient] | None = None,
+                 transcriber: Callable[[str, Path, float | None], Transcript] | None = None,
+                 url_transport=None):
         self.settings = settings
         self.store = store
         self._generator_factory = generator_factory or (
-            lambda: make_generator(settings.llm_mode, settings.model, settings.effort))
+            lambda: make_generator(settings.llm_mode, settings.model, settings.effort, settings.openai_api_key))
         self._meetstream_factory = meetstream_factory or (
             lambda: MeetStreamClient(settings.meetstream_api_key, settings.meetstream_base_url))
+        # Local speech-to-text for recordings without a MeetStream transcript (tests inject a fake).
+        self._transcribe = transcriber or (
+            lambda webinar_id, path, duration: transcribe_media(webinar_id, path, duration, settings.whisper_model))
+        self.url_transport = url_transport  # httpx transport for recording-link downloads (tests mock it)
         self._pool = ThreadPoolExecutor(max_workers=settings.job_workers, thread_name_prefix="job")
         self._generator: Generator | None = None
 
@@ -125,6 +133,10 @@ class ContentFactory:
         if self._generator is None:
             self._generator = self._generator_factory()
         return self._generator
+
+    def settings_changed(self) -> None:
+        """Keys or model changed (dashboard Settings): build a new generator for the next call."""
+        self._generator = None
 
     def meetstream(self) -> MeetStreamClient:
         return self._meetstream_factory()
@@ -234,9 +246,14 @@ class ContentFactory:
         """Create the webinar record (recording + transcript on disk) and attach it to the job."""
         job = self.store.get_job(job_id)
         source = job["source"]
-        if source["type"] != "meetstream_recording":
-            raise PipelineError(f"Unsupported source type {source['type']!r}; recordings come from MeetStream.")
-        webinar = self._ingest_meetstream(source)
+        if source["type"] == "meetstream_recording":
+            webinar = self._ingest_meetstream(source)
+        elif source["type"] == "recording_url":
+            webinar = self._ingest_url(job_id, source)
+        elif source["type"] == "upload":
+            webinar = self._ingest_upload(source)
+        else:
+            raise PipelineError(f"Unsupported source type {source['type']!r}")
         self.store.update_job(job_id, webinar_id=webinar["id"])
         transcript = self._read_transcript(webinar)
         self._warn(job_id, *validate.recording_warnings(transcript))
@@ -244,20 +261,59 @@ class ContentFactory:
             self._warn(job_id, validate.note("warning", "no_video",
                        "The recording has no video track, so clips are delivered as audio excerpts with captions."))
 
-    def _finish_webinar(self, webinar: dict, recording: Path, transcript_raw: str) -> dict:
-        """Check the downloaded media, build the IR from MeetStream's transcript, save both on the webinar."""
+    def _finish_webinar(self, webinar: dict, recording: Path, transcript_raw: str | None) -> dict:
+        """Check the media, build the IR (from MeetStream's transcript, or by transcribing locally), save both."""
         wdir = self.settings.webinar_dir(webinar["id"])
         media.require_ffmpeg()
         info = media.probe(recording)
         if not info.has_audio:
             raise PipelineError("The recording has no audio track, so there is nothing to clip.")
-        transcript = parse_transcript(webinar["id"], transcript_raw, info.duration)
+        if transcript_raw is not None:
+            transcript = parse_transcript(webinar["id"], transcript_raw, info.duration)
+        else:
+            transcript = self._transcribe(webinar["id"], recording, info.duration)
         tpath = wdir / "transcript.json"
         tpath.write_text(transcript.model_dump_json(indent=1))
         self.store.update_webinar(
             webinar["id"], recording_path=str(recording), has_video=int(info.has_video),
             duration_seconds=transcript.duration, transcript_path=str(tpath))
         return self.store.get_webinar(webinar["id"])
+
+    def _ingest_url(self, job_id: str, source: dict) -> dict:
+        """Recording-link path: download the file; use MeetStream's transcript if it's one of their links, else transcribe."""
+        url, bot_id = source["url"], source.get("bot_id")
+        name = Path(url.split("?")[0]).name or "recording.mp4"
+        webinar = self.store.create_webinar(title=source.get("title") or _title_from_filename(name),
+                                            source_type="recording_url", source_ref=bot_id or url.split("?")[0])
+        wdir = self.settings.webinar_dir(webinar["id"])
+        ext = Path(name).suffix.lower() or ".mp4"
+        recording = download_url(url, wdir / f"recording{ext}", self.url_transport)
+        transcript = None
+        if bot_id and self.settings.meetstream_api_key:
+            # A MeetStream download link names its bot, so the speaker-labelled transcript may be there.
+            client = self.meetstream()
+            try:
+                transcript = json.dumps(client.get_transcript(bot_id))
+                (wdir / "meetstream_transcript.json").write_text(transcript)
+            except MeetStreamError as e:
+                log.info("bot %s: no MeetStream transcript (%s); transcribing locally", bot_id, e)
+                self._warn(job_id, validate.note("info", "local_transcript",
+                           f"MeetStream's transcript wasn't available ({e}), so the recording was transcribed locally, without speaker names."))
+            finally:
+                client.close()
+        return self._finish_webinar(webinar, recording, transcript)
+
+    def _ingest_upload(self, source: dict) -> dict:
+        """Dropped-file path: the API saved the file under uploads/; move it into the webinar folder and transcribe."""
+        name = source.get("filename") or "recording.mp4"
+        webinar = self.store.create_webinar(title=source.get("title") or _title_from_filename(name),
+                                            source_type="upload", source_ref=name)
+        wdir = self.settings.webinar_dir(webinar["id"])
+        wdir.mkdir(parents=True, exist_ok=True)
+        src = Path(source["upload_path"])
+        recording = wdir / f"recording{src.suffix.lower()}"
+        shutil.copyfile(src, recording)  # copy, not move: a retry of a failed ingest needs the upload again
+        return self._finish_webinar(webinar, recording, None)
 
     def _ingest_meetstream(self, source: dict) -> dict:
         """MeetStream path: bot detail -> transcript -> video (or audio) -> IR.
@@ -723,3 +779,13 @@ class ContentFactory:
 
     def shutdown(self) -> None:
         self._pool.shutdown(wait=False, cancel_futures=True)
+
+
+def _title_from_filename(name: str) -> str:
+    """A readable default title from a file name: "q4-launch_webinar.mp4" -> "Q4 launch webinar".
+
+    Ids are dropped: MeetStream names downloads "meeting_recording_<bot id>.mp4".
+    """
+    stem = re.sub(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", "", Path(name).stem, flags=re.I)
+    stem = re.sub(r"\s+", " ", stem.replace("_", " ").replace("-", " ")).strip()
+    return (stem[:1].upper() + stem[1:]) if stem else "Untitled recording"
