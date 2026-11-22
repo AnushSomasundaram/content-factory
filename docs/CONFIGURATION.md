@@ -17,7 +17,7 @@ The **OpenAI key, OpenAI model and MeetStream key** can also be set in the dashb
 | `MEETSTREAM_BASE_URL` | `https://api.meetstream.ai/api/v1` | Point at a mock or staging server, e.g. `scripts/demo_meetstream.py` |
 | `CF_DATA_DIR` | `./data` | Database, recordings, renders and exports |
 | `CF_JOB_WORKERS` | `2` | Jobs processed at the same time. Each uses CPU for FFmpeg and makes up to 3 concurrent model calls. |
-| `CF_API_TOKEN` | (unset) | If set, the API requires `Authorization: Bearer <token>` (or `?access_token=`). While it is unset the API is open, so recording links that point at loopback, private, link-local or reserved addresses are refused (redirects included) |
+| `CF_API_TOKEN` | (unset) | If set, the API requires `Authorization: Bearer <token>` (or `?access_token=`). While it is unset the API is open, so recording links that point at anything other than a public internet address (loopback, private, link-local, carrier-grade NAT, reserved) are refused, redirects included |
 | `CF_MAX_UPLOAD_MB` | `4096` | Largest recording file the upload endpoint accepts; bigger files get `413` |
 | `CF_API_URL` | `http://127.0.0.1:8000` | MCP server only: where the API is |
 | `CF_NO_APP` | (unset) | Set to `1` to stop `contentfactory.api` from building its module-level app on import (the tests do this) |

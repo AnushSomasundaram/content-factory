@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 import httpx
 
@@ -108,7 +108,7 @@ class MeetStreamClient:
 
     def get_bot_detail(self, bot_id: str) -> dict:
         """`GET /bots/{id}/detail`: platform, timings, status timeline, canonical `transcript_id`."""
-        return self._get(f"/bots/{bot_id}/detail").get("bot_details", {})
+        return self._get(f"/bots/{quote(bot_id, safe='')}/detail").get("bot_details", {})
 
     # ------------------------------------------------------------ transcripts
 
@@ -118,21 +118,21 @@ class MeetStreamClient:
         Resolves the transcript id from the bot id for us. The body is a list of utterances in
         one of MeetStream's formats; `ingest.parse_transcript` understands all of them.
         """
-        return self._get(f"/bots/{bot_id}/get_transcript")
+        return self._get(f"/bots/{quote(bot_id, safe='')}/get_transcript")
 
     def list_transcriptions(self, bot_id: str) -> list[dict]:
         """`GET /bots/{id}/transcriptions`: every transcription run with provider and status."""
-        return self._get(f"/bots/{bot_id}/transcriptions").get("transcriptions", [])
+        return self._get(f"/bots/{quote(bot_id, safe='')}/transcriptions").get("transcriptions", [])
 
     # ------------------------------------------------------------ media
 
     def get_video(self, bot_id: str) -> dict:
         """`GET /bots/{id}/get_video`: `{"video_url": <presigned>, "video_info": {...}}`."""
-        return self._get(f"/bots/{bot_id}/get_video")
+        return self._get(f"/bots/{quote(bot_id, safe='')}/get_video")
 
     def get_audio(self, bot_id: str) -> dict:
         """`GET /bots/{id}/get_audio`: `{"audio_url": <presigned>}`. Always produced, even for video bots."""
-        return self._get(f"/bots/{bot_id}/get_audio")
+        return self._get(f"/bots/{quote(bot_id, safe='')}/get_audio")
 
     def download(self, url: str, dest: Path) -> Path:
         """Stream a presigned S3 URL to disk (see `download_url`)."""
@@ -145,7 +145,10 @@ def _private_hosts_blocked() -> bool:
 
 
 def _refuse_private_host(request: httpx.Request) -> None:
-    """httpx request hook (it runs for every redirect too): refuse loopback, private, link-local and reserved addresses.
+    """httpx request hook (it runs for every redirect too): refuse any address that isn't public internet.
+
+    That covers loopback, private, link-local, carrier-grade NAT (100.64/10), reserved and
+    IPv4-mapped IPv6 forms of all of them.
 
     Applies only while CF_API_TOKEN is unset. A name that doesn't resolve is let through; the request fails anyway.
     """
@@ -158,7 +161,9 @@ def _refuse_private_host(request: httpx.Request) -> None:
         return
     for a in addrs:
         ip = ipaddress.ip_address(a.split("%")[0])
-        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast or ip.is_unspecified:
+        if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+            ip = ip.ipv4_mapped
+        if not ip.is_global or ip.is_multicast:
             raise RecordingLookupError(f"Links to private or local addresses ({host}) aren't fetched. "
                                        "Download the file and drop it in instead.")
 

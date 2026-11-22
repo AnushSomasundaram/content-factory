@@ -19,7 +19,7 @@ and the pipeline share one instance, and a save takes effect for the next job.
 | CF_WHISPER_MODEL      | small                                | Local speech-to-text model for recordings without a MeetStream transcript (tiny/base/small/medium) |
 | MEETSTREAM_API_KEY    | (unset)                              | Enables MeetStream links, meeting links and bot ids |
 | MEETSTREAM_BASE_URL   | https://api.meetstream.ai/api/v1     | Override for testing                            |
-| CF_API_TOKEN          | (unset)                              | If set, the API requires this bearer token (read in api.py). While unset, recording links to private or local addresses are refused |
+| CF_API_TOKEN          | (unset)                              | If set, the API requires this bearer token (read in api.py). While unset, recording links to non-public addresses are refused |
 | CF_MAX_UPLOAD_MB      | 4096                                 | Largest recording file accepted by upload       |
 """
 

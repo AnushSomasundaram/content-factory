@@ -295,7 +295,8 @@ def test_upload_size_is_capped(tmp_path):
 
 
 @pytest.mark.parametrize("link", ["http://127.0.0.1:8080/rec.mp4", "http://169.254.169.254/latest/rec.mp4",
-                                  "http://10.0.0.5/rec.mp4", "http://[::1]/rec.mp4"])
+                                  "http://10.0.0.5/rec.mp4", "http://[::1]/rec.mp4", "http://100.64.0.7/rec.mp4",
+                                  "http://[::ffff:127.0.0.1]/rec.mp4", "http://0.0.0.0/rec.mp4"])
 def test_links_to_private_addresses_are_refused_without_a_token(tmp_path, monkeypatch, link):
     monkeypatch.delenv("CF_API_TOKEN", raising=False)
     settings = Settings(data_dir=tmp_path, llm_mode="offline", meetstream_api_key=None)

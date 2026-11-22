@@ -221,3 +221,10 @@ def test_bot_id_and_meetstream_url_are_checked_with_meetstream():
                      ("live-bot", "still in that meeting"), ("denied-bot", "didn't record it")):
         with pytest.raises(RecordingLookupError, match=why):
             resolve_recording(client, ref)
+
+
+def test_bot_ids_are_url_encoded_in_paths():
+    seen = []
+    transport = httpx.MockTransport(lambda req: seen.append(req.url.raw_path) or httpx.Response(200, json={"bot_details": {}}))
+    MeetStreamClient("k", base_url="https://api.test/api/v1", transport=transport).get_bot_detail("abc#?x=1")
+    assert seen == [b"/api/v1/bots/abc%23%3Fx%3D1/detail"]
